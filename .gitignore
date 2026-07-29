@@ -1,0 +1,8 @@
+.env
+.venv/
+.ipynb_checkpoints/
+__pycache__/
+.deepeval/
+.deepeval-cache.json
+temp_test_run_data.json
+results/

@@ -1,0 +1,30 @@
+[project]
+name = "aml-kyc-acceptance-tests"
+version = "1.0.0"
+description = "Portable black-box DeepEval acceptance tests for the AML/KYC investigation API"
+readme = "README.md"
+requires-python = ">=3.12"
+
+# Everything the notebooks import is declared here. Nothing from the developer
+# application is imported at runtime, so this directory can be copied anywhere
+# and run with `uv sync` alone.
+dependencies = [
+    "deepeval==4.1.4",
+    "httpx>=0.28.1",
+    "python-dotenv>=1.0.1",
+    "jsonschema>=4.23.0",
+    # Upper bound is a real compatibility constraint, not caution: mcp 1.28.0
+    # renamed CallToolResult.structuredContent to structured_content, and
+    # deepeval 4.1.4's MultiTurnMCPUseMetric still reads the camelCase
+    # attribute (deepeval/metrics/mcp/utils.py:64). See metric-notes.md.
+    "mcp>=1.12,<1.28",
+    "nbclient>=0.10.0",
+    "nbformat>=5.10.4",
+    "ipykernel>=6.29.5",
+    "jupyter-core>=5.7.2",
+    "nbconvert>=7.16.4",
+]
+
+[tool.uv]
+# Not an installable package - a directory of notebooks plus a runner script.
+package = false
