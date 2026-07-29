@@ -6,3 +6,6 @@ __pycache__/
 .deepeval-cache.json
 temp_test_run_data.json
 results/
+
+# Local GitHub Actions self-hosted runner
+/actions-runner/
