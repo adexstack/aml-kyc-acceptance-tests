@@ -7,5 +7,7 @@ __pycache__/
 temp_test_run_data.json
 results/
 
-# Local GitHub Actions self-hosted runner
+# Local GitHub Actions self-hosted runner. The runner actually lives
+# outside this repo (see plan.md §1.7) so this is a dead-weight safety net,
+# not what keeps it out of git - kept in case anyone registers one in-tree.
 /actions-runner/

@@ -331,9 +331,20 @@ only, no `schedule:` trigger, two inputs:
   because of that destructiveness — set it `false` if the target instance
   holds anything you don't want wiped.
 
-Steps: checkout (`actions/checkout@v7`) → `astral-sh/setup-uv@v9` →
+Steps: checkout (`actions/checkout@v7`) → `astral-sh/setup-uv@v9.0.0` →
 `uv sync --extra langfuse` → run `run_experiment.py` with the filter, tee'd
 to a file → write that file into `$GITHUB_STEP_SUMMARY`.
+
+**Fixed 2026-07-29, two issues found on first real dispatch:**
+- `astral-sh/setup-uv@v9` doesn't resolve — that action only publishes exact
+  version tags (`v9.0.0`), not a floating major-version alias like most
+  other actions. Pinned to `v9.0.0`.
+- `enable-cache: true` was stalling for minutes in the post-job cleanup
+  step, uploading `~/.cache/uv` (uv's *global* package cache, ~2.5GB) to
+  GitHub's remote cache over a home network. That remote cache exists to
+  save GitHub-hosted (ephemeral) runners from re-downloading packages every
+  run; it buys nothing on a persistent self-hosted runner, whose disk cache
+  already survives between runs. Set to `enable-cache: false`.
 
 **Decision (2026-07-29): self-hosted runner, not a staging deployment.**
 Deploying the AML app somewhere network-reachable is out of scope here (a
@@ -373,6 +384,50 @@ live. Steps to register the runner, once the repo is up:
 (`√ Connected to GitHub`, `Listening for Jobs`). Keep `./run.sh` (or the
 `svc.sh`-installed service) running whenever you want to dispatch this
 workflow; it only picks up jobs while connected.
+
+**Known limitation — runner availability, currently: foreground `./run.sh`.**
+As of 2026-07-29 the runner is being started by hand with `./run.sh` in a
+foreground terminal (`cd
+/Users/bola/seyi/AI-LLM/actions-runner-local && ./run.sh`). This works but
+has real drawbacks: closing that terminal, sleeping the laptop, or a crash
+silently stops the runner, and a `workflow_dispatch` fired while it's down
+just sits at "Waiting for a runner to pick up this job..." with no error —
+exactly the failure mode seen earlier in this session. This isn't a flaw in
+the workflow or a fixable gap in this repo; it's the inherent nature of a
+self-hosted runner on a personal machine, and the tradeoff was accepted
+deliberately (see the "self-hosted, not a staging deployment" decision
+above) — but the *foreground-terminal* way of running it is avoidable.
+
+**TODO, recommended: switch to the `svc.sh`-installed background service**
+(step 4 above already recommends this — not yet done):
+
+```bash
+cd /Users/bola/seyi/AI-LLM/actions-runner-local
+./svc.sh install
+./svc.sh start
+./svc.sh status        # confirm it's running
+```
+
+This installs the runner as a `launchd` service that starts at login and
+survives closing the terminal, without changing anything about the
+workflow file, the registration, or the security posture (still
+`workflow_dispatch`-only on a private repo). Stop the old foreground
+`./run.sh` process first (`Ctrl-C`) so two runner processes don't both try
+to register the same name. Re-confirm with `√ Connected to GitHub` /
+`Listening for Jobs` in `./svc.sh status` output, the same signal used to
+confirm registration originally.
+
+**Runner install location (updated 2026-07-29):** the runner's own files
+(`config.sh`, `run.sh`, `.credentials`, `_work/`, etc.) live at
+`/Users/bola/seyi/AI-LLM/actions-runner-local` — a sibling of this repo, not
+inside it. That's a deliberate move: this repo's `git` root has no
+visibility outside its own directory, so the runner's credentials and
+per-job workspace (which includes a full checkout of this repo under
+`_work/`) can never be accidentally staged or committed, no matter what
+`.gitignore` says. The repo's own `.gitignore` still carries an
+`/actions-runner/` entry from when the runner was expected to live inside
+the repo tree — harmless to keep as a safety net, but it's not what's doing
+the work now.
 
 **Still needed before a real dispatch will succeed** (repo → Settings →
 Secrets and variables → Actions): secrets `LANGFUSE_PUBLIC_KEY`,

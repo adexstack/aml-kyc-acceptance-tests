@@ -167,6 +167,46 @@ value at all. The individual design docs live in [`docs/`](docs/):
   application's existing audit trail (decisions, EOD report, role
   boundaries) from outside
 
+## Langfuse experiment runner (optional, separate from the core suite)
+
+`run_experiment.py` (repo root) re-runs the same metrics through Langfuse to
+build score history instead of DeepEval's pass/fail notebook output. It's a
+separate entry point, not a replacement for `run_all.py` — the core suite
+above stays Langfuse-free and installable offline by design; see
+[`docs/observability-plan.md`](docs/observability-plan.md) §3.1 for why.
+
+```bash
+uv sync --extra langfuse
+uv run python run_experiment.py                    # all 14 metrics
+uv run python run_experiment.py tool_correctness    # substring filter on experiment names
+```
+
+Needs `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` in `.env`, in addition
+to the variables above. It applies the same PII-masking function to
+everything it sends and refuses to run unless `AML_API_BASE_URL` resolves to
+an instance serving the known synthetic seed data — see
+`docs/observability-plan.md` §5 for the PII stance this repo holds itself to.
+
+### CI: on-demand dispatch via a self-hosted runner
+
+[`.github/workflows/langfuse-experiment.yml`](.github/workflows/langfuse-experiment.yml)
+runs `run_experiment.py` on `workflow_dispatch` only — no `schedule:`
+trigger, since every run costs real judge and application LLM calls. It
+requires a **self-hosted** runner, not `ubuntu-latest`, because it needs to
+reach `AML_API_BASE_URL` on `localhost`. Runner registration, required repo
+secrets/variables, and the current confirmed status are tracked in
+`plan.md` §1.7, not here — that's machine-specific operational state, not
+something a portable copy of this repo needs.
+
+**The runner must be actively running for a dispatch to work at all** — a
+self-hosted runner is a process that polls GitHub, not an always-on service
+GitHub provides. If nothing is listening, `workflow_dispatch` just sits at
+"Waiting for a runner to pick up this job..." indefinitely, with no error.
+`plan.md` §1.7 tracks the current state (as of 2026-07-29, a foreground
+`./run.sh`) and the recommended move to `./svc.sh install && ./svc.sh
+start` so the runner survives closing the terminal instead of needing to be
+started by hand before every dispatch.
+
 ## How trace-dependent metrics obtain internal data
 
 Metrics needing more than the final answer - invoked tools, arguments, MCP
