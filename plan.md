@@ -168,10 +168,11 @@ filesystem dependency on, the application source.
   caveat, worth a note there once confirmed reproducible.
 - **§1.7 (CI):** done. `.github/workflows/langfuse-experiment.yml` —
   `workflow_dispatch` only, no schedule, `runs-on: [self-hosted, macOS,
-  ARM64]` (decided 2026-07-29: self-hosted, not a staging deployment — see
-  §1.7). **Not yet exercisable**: you're pushing this repo to GitHub
-  yourself, and the runner still needs registering on your machine — see
-  §1.7 for the exact steps and the confirmation checkpoint.
+  ARM64]` (decided 2026-07-29: self-hosted, not a staging deployment).
+  Repo pushed to GitHub and runner registered + confirmed listening
+  2026-07-29. **Last step before a real dispatch works**: repo secrets/
+  variables (`LANGFUSE_*`, `OPENAI_API_KEY`, `AML_API_BASE_URL`, etc.) —
+  see §1.7 for the exact list.
 
 **A correction to this plan's own original text, found by inspecting the
 installed SDK rather than trusting hosted docs a second time:** the
@@ -368,8 +369,18 @@ live. Steps to register the runner, once the repo is up:
    docs first, and don't make this repo public with the runner attached
    without that same re-read.
 
-**Confirm here once the runner shows "Listening for Jobs"** — that's the
-last piece before a `workflow_dispatch` run can actually succeed.
+**Confirmed 2026-07-29** — runner registered (`v2.336.0`) and listening
+(`√ Connected to GitHub`, `Listening for Jobs`). Keep `./run.sh` (or the
+`svc.sh`-installed service) running whenever you want to dispatch this
+workflow; it only picks up jobs while connected.
+
+**Still needed before a real dispatch will succeed** (repo → Settings →
+Secrets and variables → Actions): secrets `LANGFUSE_PUBLIC_KEY`,
+`LANGFUSE_SECRET_KEY`, `OPENAI_API_KEY`, relevant `AML_API_KEY*`; variables
+`AML_API_BASE_URL=http://localhost:8000` (reachable now that the runner is
+local), `LANGFUSE_BASE_URL`, `AML_EXPECTED_SEED_VERSION`,
+`DEEPEVAL_JUDGE_MODEL`. Same list as earlier in this section — repeated
+here since the runner being live makes this the actual next blocker.
 
 **One thing this workflow still cannot solve for you:**
 
