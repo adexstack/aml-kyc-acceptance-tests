@@ -1,0 +1,120 @@
+# docs/observability-plan.md Phase 1.7 / plan.md §1.7 — on-demand only, no
+# `schedule:` trigger. Revisit cadence once a handful of manual runs give a
+# real cost figure (observability-plan.md §6 step 5) - don't schedule
+# against a guess.
+#
+# This is new CI surface: no .github/workflows directory existed in this
+# repo before this file. It runs run_experiment.py (the Langfuse-backed
+# experiment runner, see plan.md Phase 1), never the 14 notebooks or
+# run_all.py - those stay Langfuse-free and offline-runnable by design
+# (docs/observability-plan.md §3.1).
+#
+# Runs on a SELF-HOSTED runner (`runs-on` below), not `ubuntu-latest` - a
+# GitHub-hosted runner cannot reach http://localhost:8000. See plan.md §1.7
+# for the registration steps. Security note, from GitHub's own guidance:
+# self-hosted runners are safe on a PRIVATE repo triggered only by
+# `workflow_dispatch` (no `pull_request` trigger here, so a fork PR can't
+# run arbitrary code on your machine) - keep it that way. Do not add a
+# `pull_request` trigger to this workflow without re-reading GitHub's
+# self-hosted-runner security docs first.
+#
+# BEFORE FIRST USE, you must:
+#   1. Register a self-hosted runner for this repo - see plan.md §1.7.
+#   2. Set repository secrets: LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY,
+#      OPENAI_API_KEY, and whichever AML_API_KEY* the target instance's
+#      AUTH_MODE requires (blank/unset is correct for AUTH_MODE=off).
+#   3. Set repository variables (or secrets, if you consider the URL
+#      sensitive): AML_API_BASE_URL (e.g. http://localhost:8000 - reachable
+#      now that this runs on your own machine), LANGFUSE_BASE_URL (default
+#      below is the EU host, confirmed 2026-07-29), AML_EXPECTED_SEED_VERSION,
+#      DEEPEVAL_JUDGE_MODEL.
+#
+# Masking/PII posture (plan.md §0/§1.1): every experiment module refuses to
+# run unless the target instance serves the known synthetic seed data - see
+# experiments/common.load_scenarios(). Do not point AML_API_BASE_URL at an
+# instance holding real customer-derived data without first revisiting that
+# decision.
+
+name: Langfuse experiment (Phase 1)
+
+on:
+  workflow_dispatch:
+    inputs:
+      filter:
+        description: >-
+          Optional substring filter on experiment function names (e.g.
+          "tool_correctness"). Leave blank to run all 14 metrics - budget
+          for real judge spend across all of them, some judging per chunk.
+        required: false
+        default: ""
+      reset_before_run:
+        description: >-
+          Reset the target instance's database before running (AML_RESET_BEFORE_RUN).
+          DROPS AND RECREATES EVERY TABLE. Needed for correct first-run
+          planner behaviour on the tool-planning metrics (ToolCorrectness,
+          ArgumentCorrectness, PlanAdherence, ToolUse, MultiTurnMCPUse) -
+          without it, a case already investigated by an earlier run scores
+          incorrectly, not the application scoring badly. Only say true
+          against an instance you're sure is safe to reset.
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  run-experiment:
+    # Self-hosted, not ubuntu-latest - see the file header. Labels match
+    # what GitHub auto-assigns a macOS/ARM64 self-hosted runner; adjust if
+    # you registered it with custom labels instead.
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v9
+        with:
+          enable-cache: true
+
+      - name: Install dependencies (core + langfuse extra)
+        run: uv sync --extra langfuse
+
+      - name: Run Langfuse experiment(s)
+        env:
+          AML_API_BASE_URL: ${{ vars.AML_API_BASE_URL }}
+          AML_API_KEY: ${{ secrets.AML_API_KEY }}
+          AML_API_KEY_ANALYST: ${{ secrets.AML_API_KEY_ANALYST }}
+          AML_API_KEY_EVAL_READER: ${{ secrets.AML_API_KEY_EVAL_READER }}
+          AML_API_KEY_TEST_OPERATOR: ${{ secrets.AML_API_KEY_TEST_OPERATOR }}
+          AML_EXPECTED_SEED_VERSION: ${{ vars.AML_EXPECTED_SEED_VERSION || 'scenarios-v1' }}
+          AML_RESET_BEFORE_RUN: ${{ inputs.reset_before_run }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          DEEPEVAL_JUDGE_MODEL: ${{ vars.DEEPEVAL_JUDGE_MODEL || 'gpt-5.4-mini' }}
+          DEEPEVAL_TELEMETRY_OPT_OUT: "YES"
+          LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+          LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+          LANGFUSE_BASE_URL: ${{ vars.LANGFUSE_BASE_URL || 'https://cloud.langfuse.com' }}
+        run: |
+          set +e
+          uv run python run_experiment.py "${{ inputs.filter }}" | tee experiment_output.txt
+          exit "${PIPESTATUS[0]}"
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "### Langfuse experiment run"
+            echo
+            echo '```'
+            cat experiment_output.txt 2>/dev/null || echo "(no output captured)"
+            echo '```'
+            echo
+            echo "**Note**: this run used local (in-code) dataset items, not a"
+            echo "Langfuse-hosted Dataset, so the SDK does not return a per-run"
+            echo "deep link (\`dataset_run_url\` is only populated for Dataset-backed"
+            echo "runs). Browse the project directly instead:"
+            echo
+            echo "${LANGFUSE_BASE_URL:-https://cloud.langfuse.com} -> Tracing ->"
+            echo "filter Environment = \`sdk-experiment\` -> match the run name"
+            echo "printed above (e.g. \`aml-acceptance-<metric> - <timestamp>\`)."
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          LANGFUSE_BASE_URL: ${{ vars.LANGFUSE_BASE_URL }}

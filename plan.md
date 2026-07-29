@@ -99,12 +99,108 @@ verified them.
 documented and used elsewhere in this repo. No import from, and no
 filesystem dependency on, the application source.
 
+### Status
+
+**§1.1–1.5 done and verified 2026-07-29 — Phase 1 is functionally complete.**
+
+- **§1.1 (provisioning):** done. Langfuse Cloud project
+  `aml-kyc-acceptance-tests-synthetic` created under the EU host
+  (`cloud.langfuse.com` — confirmed via search that this *is* the EU
+  region; US is `us.cloud.langfuse.com`), keys in `.env`.
+- **§1.2 (optional dependency):** done. `pyproject.toml` has `langfuse` and
+  `dev` optional-dependency groups; `langfuse==4.14.1` pinned (checked
+  against the live PyPI JSON API, not guessed). Core `uv sync` stays
+  Langfuse-free.
+- **§1.3 (masking):** done. `langfuse_mask.py` + `tests/test_langfuse_mask.py`
+  — fail-closed, fixtures for every named PII field. **14/14 tests pass.**
+  One real bug caught and fixed during §1.5: masking must never be applied
+  to the data `task()`/evaluators return — that's what DeepEval actually
+  scores, and pre-masking it (as an earlier draft of this code did) would
+  silently break any metric that compares real values, like
+  `ToolCorrectnessMetric`'s argument check against a masked
+  `"***MASKED***"` placeholder. Masking now happens exactly once, at the
+  Langfuse SDK's export boundary (`Langfuse(mask=mask)`), confirmed by
+  direct SDK testing to receive whole nested objects, not flattened
+  scalars — see `langfuse_mask.py`'s docstring and
+  `experiments/investigate.py`'s module docstring for the `tool`/`server`
+  naming convention this also required (the masker's "name" substring
+  match would otherwise redact a tool's own identifier, not just a
+  person's name).
+- **§1.4 (proof) + §1.5 (all 14 metrics):** done, and now **all 14 have run
+  at least once against the live local instance and real Langfuse Cloud**
+  (6 by me, 2 by you, 6 by you as a follow-up). `run_experiment.py` is the
+  CLI entrypoint (`uv run python run_experiment.py [substring-filter]`,
+  `--list`); metric logic lives in
+  `experiments/{rag_query,retrieval,investigate,conversational}.py`, one
+  from-scratch port per notebook.
+
+  | Metric | Score | Note |
+  |---|---|---|
+  | `answer_relevancy` | 1.000 | |
+  | `hallucination` | 0.800 | |
+  | `contextual_precision` | 1.000 | no-LLM ranking metric |
+  | `contextual_recall` | (run by you) | |
+  | `tool_correctness` | 1.000 / 1.000 | names + arguments; validates expected-tool derivation and live-schema check |
+  | `argument_correctness` | 1.000 | |
+  | `bias` | (run by you) | |
+  | `prompt_alignment` | **raised, no score** — see finding below | |
+  | `plan_adherence` | 1.000 | verbose log shows the full 8-step plan matched exactly |
+  | `tool_use` | 0.667 | matches the source notebook's own documented authoring-run score |
+  | `multi_turn_mcp_use` | 0.793 (args 0.990 / primitive 0.753) | matches the notebook's own authoring-run pattern |
+  | `turn_relevancy` | 1.000 | the one genuinely-application-owned multi-turn conversation |
+  | `pii_leakage` | 0.000 | **expected** — the adversarial probe; a failing score here is the correct finding (metric-notes.md), not a defect |
+  | `summarization` | 0.600 | passes |
+
+  **A real finding, not a bug in the port (2026-07-29):** `prompt_alignment`
+  raised its deterministic evidence-labelling guard — the agent's rationale
+  for scenario s2 cited tool-call evidence labels (`T1, T2, T3`) that did
+  not resolve in the investigation's own `evidence` array. Confirmed this
+  isn't a false positive in the check itself: an immediate follow-up
+  `POST /investigate` on the same case resolved all six labels
+  (`C5, C6, T1-T4`) cleanly, so the checking logic is correct and the
+  failure was a genuine instance of the live agent hallucinating an
+  evidence citation — likely intermittent, since it depends on LLM
+  generation rather than a deterministic code path. **Do not treat a clean
+  re-run as this being fixed** — track it, don't dismiss it; this is
+  exactly the class of defect `PromptAlignmentMetric`'s deterministic check
+  (independent of the judge) exists to catch, and `docs/metric-notes.md`
+  currently lists this metric as "Implemented and verified" without this
+  caveat, worth a note there once confirmed reproducible.
+- **§1.7 (CI):** done. `.github/workflows/langfuse-experiment.yml` —
+  `workflow_dispatch` only, no schedule, `runs-on: [self-hosted, macOS,
+  ARM64]` (decided 2026-07-29: self-hosted, not a staging deployment — see
+  §1.7). **Not yet exercisable**: you're pushing this repo to GitHub
+  yourself, and the runner still needs registering on your machine — see
+  §1.7 for the exact steps and the confirmation checkpoint.
+
+**A correction to this plan's own original text, found by inspecting the
+installed SDK rather than trusting hosted docs a second time:** the
+`get_client(mask=...)` pattern originally sketched here doesn't exist —
+`inspect.signature(get_client)` shows it only accepts `public_key`. Mask is
+passed via `Langfuse(mask=mask)` directly. Everything else —
+`run_experiment` signature, `Evaluation` fields, `LocalExperimentItem`'s
+required keys, the `mask` callback contract, and both
+`LANGFUSE_BASE_URL`/`LANGFUSE_HOST` env vars — was checked the same way
+(`inspect.signature`, reading `langfuse/_client/client.py` and
+`langfuse/types.py` directly in the installed package) and matches what's
+in the code.
+
+**Next step, your call:** Phase 1 (§1.1–1.7) is functionally complete. Open
+items: (1) the `prompt_alignment` finding above — decide whether to raise
+it with whoever owns the application, track it as a known intermittent
+issue, or investigate further; (2) Phase 1.7's CI workflow needs a GitHub
+remote and a network-reachable `AML_API_BASE_URL` before it can actually
+run (see §1.7 below); (3) whether to move on to Phase 2 (app-side tracing)
+at all — the trigger for that is a concrete question Phase 1 can't answer,
+which hasn't come up yet.
+
 ### 1.1 Provision Langfuse (Cloud, EU region, synthetic data only)
 
-1. Create an account/project at the **EU-region** Langfuse Cloud endpoint
-   (`https://cloud.langfuse.com` region selector → EU, or the direct EU host
-   documented in Langfuse's own docs — confirm the current URL there, don't
-   guess it here).
+1. Create an account/project at the **EU-region** Langfuse Cloud endpoint.
+   **Confirmed 2026-07-29**: `https://cloud.langfuse.com` *is* the EU host;
+   US is the distinct `https://us.cloud.langfuse.com` (also JP/HIPAA hosts
+   exist). Don't assume this stays true indefinitely — Langfuse could add
+   or rename regions.
 2. Name the project something unambiguous, e.g.
    `aml-kyc-acceptance-tests-synthetic`. The name itself should signal "not
    real data" to anyone who finds it later.
@@ -218,22 +314,89 @@ chunk). With 8 scenarios × 14 metrics, budget for on the order of a hundred
 judge calls per full run at `gpt-5.4-mini` — cheap individually, non-trivial
 in aggregate. This is the reason cadence (§1.7) matters.
 
-### 1.7 CI — on-demand only, per your decision
+### 1.7 CI — on-demand only, per your decision — DONE
 
-No `.github/workflows` directory exists in this repo yet — this is new CI
-surface, not an addition to something already there. Add a manually
-triggered workflow (`workflow_dispatch`, no `schedule:` trigger) that:
+**Built 2026-07-29**: `.github/workflows/langfuse-experiment.yml` — new CI
+surface (no `.github/workflows` existed before this). `workflow_dispatch`
+only, no `schedule:` trigger, two inputs:
 
-1. Checks out the repo.
-2. `uv sync --extra langfuse`.
-3. Runs `run_experiment.py` with `LANGFUSE_*` and `AML_API_BASE_URL` from
-   repository secrets/environment.
-4. Surfaces the Langfuse run URL in the job output or summary so a human
-   can click through.
+- `filter` — optional substring on experiment function names, blank runs
+  all 14.
+- `reset_before_run` — boolean, **defaults to `true`**, maps to
+  `AML_RESET_BEFORE_RUN`. Needed for correct first-run planner behaviour on
+  the tool-planning metrics; **drops and recreates every table** on
+  whatever instance `AML_API_BASE_URL` points to. Exposed as an explicit,
+  visible dispatch input rather than hardcoded either way, precisely
+  because of that destructiveness — set it `false` if the target instance
+  holds anything you don't want wiped.
+
+Steps: checkout (`actions/checkout@v7`) → `astral-sh/setup-uv@v9` →
+`uv sync --extra langfuse` → run `run_experiment.py` with the filter, tee'd
+to a file → write that file into `$GITHUB_STEP_SUMMARY`.
+
+**Decision (2026-07-29): self-hosted runner, not a staging deployment.**
+Deploying the AML app somewhere network-reachable is out of scope here (a
+different repository's job, per CLAUDE.md's bucket-2 rule) — a self-hosted
+GitHub Actions runner on your own machine sidesteps that entirely, since it
+runs the job locally and can reach `http://localhost:8000` directly. The
+workflow's `runs-on` is now `[self-hosted, macOS, ARM64]` (matching what
+GitHub auto-assigns a macOS/Apple-Silicon self-hosted runner), not
+`ubuntu-latest`.
+
+**You handle GitHub-remote creation and pushing yourself** (per your
+choice) — confirm here once the repo exists so I know CI has somewhere to
+live. Steps to register the runner, once the repo is up:
+
+1. On GitHub: repo → **Settings → Actions → Runners → New self-hosted
+   runner**. Select **macOS** and **ARM64**.
+2. GitHub generates the exact download/config commands **and a
+   registration token that expires in about an hour** — run the commands
+   it shows you at that moment; don't reuse commands from a screenshot or
+   an old session, the token won't still be valid.
+3. `./config.sh` will prompt for the runner name and labels — accept the
+   defaults (`self-hosted`, `macOS`, `ARM64` get applied automatically) so
+   they match this workflow's `runs-on`.
+4. Run it as a persistent background service rather than in a foreground
+   terminal you might close: `./svc.sh install && ./svc.sh start` (GitHub's
+   runner package includes this script). Check status with `./svc.sh
+   status`.
+5. **Security note, from GitHub's own guidance**, already in the workflow
+   file's header comment: self-hosted runners are safe on a private repo
+   triggered only by `workflow_dispatch` — there's no `pull_request`
+   trigger here, so a fork PR can't run arbitrary code on your machine.
+   Don't add one without re-reading GitHub's self-hosted-runner security
+   docs first, and don't make this repo public with the runner attached
+   without that same re-read.
+
+**Confirm here once the runner shows "Listening for Jobs"** — that's the
+last piece before a `workflow_dispatch` run can actually succeed.
+
+**One thing this workflow still cannot solve for you:**
+
+1. **No per-run deep link.** `ExperimentResult.dataset_run_url` (confirmed
+   by reading `langfuse/experiment.py` in the installed package) is only
+   populated when scoring against a real Langfuse-hosted Dataset. Every
+   experiment in this repo uses local (in-code) dataset items instead — see
+   `experiments/*.py` — so this field is always `None` here, and the
+   summary step says so rather than fabricate a link. A human has to
+   browse to the project and filter `Environment = sdk-experiment`,
+   matching the run name printed in the log
+   (`aml-acceptance-<metric> - <timestamp>`). Moving to real Langfuse
+   Datasets would fix this but is a bigger design change, not something to
+   slip in as a CI side effect.
+
+**Secrets/variables you still need to set in the GitHub repo before first
+use** (I cannot set these for you): secrets `LANGFUSE_PUBLIC_KEY`,
+`LANGFUSE_SECRET_KEY`, `OPENAI_API_KEY`, and whichever `AML_API_KEY*` the
+target instance's `AUTH_MODE` requires; variables `AML_API_BASE_URL`,
+`LANGFUSE_BASE_URL` (defaults to the confirmed EU host if unset),
+`AML_EXPECTED_SEED_VERSION`, `DEEPEVAL_JUDGE_MODEL`.
 
 Revisit scheduling once you've seen a handful of on-demand runs and have a
 real cost figure, per `observability-plan.md` §6 step 5 — don't schedule
-against a guess.
+against a guess. This repo also has no GitHub remote configured yet
+(`git remote -v` is empty), so none of this can actually execute in GitHub
+Actions until it's pushed to a GitHub repo.
 
 **Production impact of Phase 1 as a whole:** every run performs real writes
 against the target instance (`investigate` calls), same as `run_all.py`

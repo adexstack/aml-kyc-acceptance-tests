@@ -25,6 +25,25 @@ dependencies = [
     "nbconvert>=7.16.4",
 ]
 
+[project.optional-dependencies]
+# Only needed by run_experiment.py (the Langfuse-backed experiment runner,
+# docs/observability-plan.md Phase 1). `uv sync` with no flags never installs
+# this - the 14 notebooks and run_all.py must stay Langfuse-free, per
+# docs/observability-plan.md §3.1. Install with `uv sync --extra langfuse`.
+langfuse = [
+    "langfuse==4.14.1",
+]
+# Only needed to run the masking unit tests (test_langfuse_mask.py).
+# `uv sync --extra dev`.
+dev = [
+    "pytest>=8.3.0",
+]
+
+[tool.pytest.ini_options]
+# Lets `tests/test_langfuse_mask.py` import the repo-root `langfuse_mask.py`
+# module without needing this directory installed as a package.
+pythonpath = ["."]
+
 [tool.uv]
 # Not an installable package - a directory of notebooks plus a runner script.
 package = false

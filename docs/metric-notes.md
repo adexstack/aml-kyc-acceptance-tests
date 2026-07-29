@@ -51,7 +51,7 @@ a deliberate deviation and is recorded here rather than made silently.
 | `PIILeakageMetric` | Implemented and verified | `GET /api/documents`, `POST /api/rag/query` | `LLMTestCase` with `input`, `actual_output` | Yes | Judges only the text returned to the caller. It cannot see PII that reached a log, a prompt, or a third-party model, so a pass is evidence about the response surface only | None. Full coverage would need an API-exposed record of outbound prompts |
 | `BiasMetric` | Implemented and verified | `GET /api/cases/{id}`, `POST /api/cases/{id}/investigate` | `LLMTestCase` with `input`, `actual_output` | Yes | Single-case measurement cannot establish disparate treatment. Detecting that requires the same case run with a protected attribute varied and the outputs compared - out of scope for one notebook per metric | None. A fixture pair differing only in nationality would make this materially stronger |
 | `SummarizationMetric` | Implemented and verified | `GET /api/documents/{id}` for the source, `POST /api/rag/query` for the summary | `LLMTestCase` with `input` (source text), `actual_output` | Yes | The application has no dedicated summarisation endpoint; a RAG answer over a known policy document is used as the summary under test. That is a fair proxy but is not the same as grading a product summarisation feature | None. A first-class summarisation endpoint would make this direct |
-| `PromptAlignmentMetric` | Implemented and verified | `GET /api/cases/{id}`, `POST /api/cases/{id}/investigate` | `LLMTestCase` plus explicit `prompt_instructions` | Yes | The instruction list is the *documented output contract* (state a recommendation, cite evidence, use business language), not the application's real system prompt, which is not exposed. This measures conformance to the published contract, which is the appropriate black-box target | None. Exposing the effective system prompt would allow literal alignment testing, and would also widen the attack surface - not recommended |
+| `PromptAlignmentMetric` | Implemented and verified | `GET /api/cases/{id}`, `POST /api/cases/{id}/investigate` | `LLMTestCase` plus explicit `prompt_instructions` | Yes | The instruction list is the *documented output contract* (state a recommendation, cite evidence, use business language), not the application's real system prompt, which is not exposed. This measures conformance to the published contract, which is the appropriate black-box target. **See "Live-run finding" below**: an intermittent evidence-label hallucination in the live agent's rationale was observed 2026-07-29 via this metric's deterministic guard - not a defect in the metric, a finding about the application | None. Exposing the effective system prompt would allow literal alignment testing, and would also widen the attack surface - not recommended |
 | `HallucinationMetric` | Implemented and verified | `GET /api/documents`, `GET /api/documents/{id}`, `POST /api/rag/query` | `LLMTestCase` with `context` (authoritative documents) | Yes | `context` is the served policy corpus. Any claim true of the world but absent from the corpus counts as a hallucination here, which is the correct standard for a compliance tool but will read as harsh on general knowledge | None |
 | `TurnRelevancyMetric` | Implemented and verified | `POST /api/cases/{id}/conversation`, `POST /api/rag/query` | `ConversationalTestCase` with ordered `Turn`s | Yes | Uses the real multi-turn conversation endpoint, so turn structure is genuine. Judges relevancy of each turn to the conversation, not factual correctness | None |
 | `ContextualPrecisionMetric` | Implemented and verified | `GET /api/documents`, `GET /api/documents/{id}`, `POST /api/rag/retrieve` | `LLMTestCase` with `retrieval_context`, `expected_output` | Yes | Golden is a restatement of AML-001 sections 2.1-2.3, asserted against the served document before use. The assertion compares whitespace-collapsed text: the served markdown hard-wraps at ~72 characters, so a clause spanning a line break is not a raw substring even when present verbatim | None |
@@ -109,6 +109,42 @@ a deliberate deviation and is recorded here rather than made silently.
 - **Portability impact**: the pin travels with `pyproject.toml` and `uv.lock`,
   so a detached copy resolves correctly. It does constrain any future
   environment that needs a newer `mcp` for another reason.
+
+## Live-run finding: intermittent evidence-label hallucination (`PromptAlignmentMetric`)
+
+**Observed 2026-07-29**, running `experiments/investigate.py`'s port of this
+notebook (via `run_experiment.py`, docs/observability-plan.md Phase 1) against
+a live local instance.
+
+`PromptAlignmentMetric`'s deterministic pre-check - independent of the judge,
+see the notebook and `experiments/investigate.py` - asserts that every
+`C#`/`T#` evidence label cited in an investigation's `rationale` resolves to a
+real entry in that same investigation's `evidence` array. On scenario s2
+("High-risk jurisdiction transfer"), one run's rationale cited `T1, T2, T3`
+while the returned `evidence` array carried no matching entries for those
+labels. The check raised, correctly - this is exactly the failure mode it
+exists to catch.
+
+**Confirmed not a false positive in the check itself**: an immediate
+follow-up `POST /api/cases/{case_id}/investigate` on the same case, same day,
+same code, produced a rationale whose six cited labels (`C5, C6, T1-T4`) all
+resolved cleanly against its own `evidence` array. The checking logic is
+correct; the earlier run's live agent output did not satisfy the contract the
+application publishes for itself.
+
+**What this means**: the agent occasionally hallucinates an evidence
+citation - it states a tool-call label in `rationale` that its own tool-call
+record does not support at generation time. Likely non-deterministic (it
+depends on the LLM's synthesis output, not a deterministic code path), so a
+clean re-run is not evidence this is fixed, and repeated occurrences would be
+worth a regression check (`docs/regression-testing-plan.md`) rather than a
+one-off note.
+
+**Why the table row above is left "Implemented and verified" rather than
+"Blocked" or "Limited"**: the metric itself works correctly, as demonstrated
+by both the failing and the passing run - this is a finding *about the
+application's evidence-labelling discipline*, not a defect in the test or a
+metric limitation. Whoever owns the application should be made aware of it.
 
 ## Notes on `@observe` and trace export
 
