@@ -72,7 +72,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@v9.0.0
         with:
-          enable-cache: true
+          enable-cache: false
 
       - name: Install dependencies (core + langfuse extra)
         run: uv sync --extra langfuse
