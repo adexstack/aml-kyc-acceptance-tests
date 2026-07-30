@@ -202,10 +202,10 @@ something a portable copy of this repo needs.
 self-hosted runner is a process that polls GitHub, not an always-on service
 GitHub provides. If nothing is listening, `workflow_dispatch` just sits at
 "Waiting for a runner to pick up this job..." indefinitely, with no error.
-`plan.md` §1.7 tracks the current state (as of 2026-07-29, a foreground
-`./run.sh`) and the recommended move to `./svc.sh install && ./svc.sh
-start` so the runner survives closing the terminal instead of needing to be
-started by hand before every dispatch.
+It runs as a `launchd` background service (`./svc.sh install && ./svc.sh
+start` in `actions-runner-local`, not foreground `./run.sh`) so it survives
+closing the terminal and restarts at login — see `plan.md` §1.7 for setup
+and current status.
 
 ## How trace-dependent metrics obtain internal data
 

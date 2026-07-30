@@ -381,25 +381,16 @@ live. Steps to register the runner, once the repo is up:
    without that same re-read.
 
 **Confirmed 2026-07-29** — runner registered (`v2.336.0`) and listening
-(`√ Connected to GitHub`, `Listening for Jobs`). Keep `./run.sh` (or the
-`svc.sh`-installed service) running whenever you want to dispatch this
-workflow; it only picks up jobs while connected.
+(`√ Connected to GitHub`, `Listening for Jobs`). It only picks up jobs while
+connected — see the `svc.sh` background-service note below for how that
+connection is now kept alive.
 
-**Known limitation — runner availability, currently: foreground `./run.sh`.**
-As of 2026-07-29 the runner is being started by hand with `./run.sh` in a
-foreground terminal (`cd
-/Users/bola/seyi/AI-LLM/actions-runner-local && ./run.sh`). This works but
-has real drawbacks: closing that terminal, sleeping the laptop, or a crash
-silently stops the runner, and a `workflow_dispatch` fired while it's down
-just sits at "Waiting for a runner to pick up this job..." with no error —
-exactly the failure mode seen earlier in this session. This isn't a flaw in
-the workflow or a fixable gap in this repo; it's the inherent nature of a
-self-hosted runner on a personal machine, and the tradeoff was accepted
-deliberately (see the "self-hosted, not a staging deployment" decision
-above) — but the *foreground-terminal* way of running it is avoidable.
-
-**TODO, recommended: switch to the `svc.sh`-installed background service**
-(step 4 above already recommends this — not yet done):
+**Resolved 2026-07-30 — switched to the `svc.sh`-installed background
+service.** The runner previously ran as foreground `./run.sh`, which had
+real drawbacks: closing the terminal, sleeping the laptop, or a crash
+silently stopped the runner, and a `workflow_dispatch` fired while it was
+down just sat at "Waiting for a runner to pick up this job..." with no
+error — exactly the failure mode seen earlier in this session. Fixed by:
 
 ```bash
 cd /Users/bola/seyi/AI-LLM/actions-runner-local
@@ -407,6 +398,15 @@ cd /Users/bola/seyi/AI-LLM/actions-runner-local
 ./svc.sh start
 ./svc.sh status        # confirm it's running
 ```
+
+Installed as a per-user `launchd` LaunchAgent
+(`~/Library/LaunchAgents/actions.runner.adexstack-aml-kyc-acceptance-tests.Bolas-Air.plist`,
+logs at `~/Library/Logs/actions.runner.adexstack-aml-kyc-acceptance-tests.Bolas-Air/`).
+Confirmed listening (`√ Connected to GitHub`, `Listening for Jobs`) — no
+foreground terminal required, survives terminal close, restarts at login.
+No `run.sh` process should be started manually anymore; use `./svc.sh
+{start,stop,status,uninstall}` in `actions-runner-local` to manage it going
+forward.
 
 This installs the runner as a `launchd` service that starts at login and
 survives closing the terminal, without changing anything about the
