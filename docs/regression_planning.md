@@ -1,6 +1,9 @@
 # Regression runs and cross-run comparison — implementation findings
 
-**Status: implementation spec. Nothing here has been built yet.** Written
+**Status: built 2026-07-31**, in the form phased by
+[`../plan.md`](../plan.md) §R0–R2 rather than exactly as sketched in §2 below
+(run identity travels as `release` *and* metadata, not metadata alone — see
+the correction in §1). Written
 2026-07-30 against `langfuse==4.14.1` as installed, and against a running
 application instance's `/openapi.json` and live responses.
 
@@ -50,6 +53,12 @@ what you would reasonably assume:
    `Environment = sdk-experiment` filter documented in `plan.md` §1.7 is not
    a convention this repo chose — it is imposed by the SDK.)
 
+   **Measured 2026-07-31, and stranger than the source suggests:** spans and
+   scores report *different* environments. `observations` reports
+   `sdk-experiment`; `scores-numeric` and the UI's own score export report
+   `default`. So filtering scores by `sdk-experiment` in the UI returns
+   nothing at all. Filter on neither.
+
 2. **Score `metadata` is a free-form dict that survives the round trip.**
    `Evaluation(metadata=…)` → `create_score(metadata=…)` (`client.py:3132`)
    → returned in the `metadata` field of every score read back via
@@ -65,6 +74,22 @@ what you would reasonably assume:
 > [`plan.md`](../plan.md) §1 for the full dimension list and §2 (Phase R0.1)
 > for the resulting "label in three places" design. Do not implement §2
 > below on its own if you intend to build dashboards.
+
+> **Two further corrections from building it, 2026-07-31 — both verified
+> against the live API, and both silent failures if you get them wrong.**
+>
+> 1. **`get_many_v3` returns `metadata: None` unless you ask for it.** The v3
+>    score API returns only core fields by default; `comment`, `config_id`
+>    and `metadata` come from the `details` field group. So
+>    `get_many_v3(...)` without `fields="details"` returns every score with
+>    no run identity at all, and a comparison script built on it reports
+>    "no labelled scores found" while the scores sit there perfectly well
+>    stored. `compare_runs.py` passes `fields="details"`.
+> 2. **Metadata does not round-trip verbatim.** The flat strings written on
+>    the way in come back parsed: `"true"` returns as `True`, `"8"` as `8`,
+>    `"0.0"` as `0`. Writing flat strings is still right (values are
+>    flattened and serialised on export), but any reader must normalise
+>    before comparing, or an axis will appear to differ from itself.
 
 ### The read path that makes comparison automatable
 
@@ -255,7 +280,19 @@ created_at:          "2026-07-29T21:17:23.279587"
 is correct and now verified end to end. **Everything in §2 above can be built
 without asking the application team for anything.**
 
-### One genuine bucket-2 gap: no build/release identifier
+### One genuine bucket-2 gap: no build/release identifier — **closed 2026-07-31**
+
+**Asked for, delivered and verified the same day.** `GET /api/health` now
+returns `build_version` (string, `"<version>+<short SHA>"`), documented in
+`/openapi.json`; `schema_version` moved to `1.1.0` and the bump was confirmed
+additive field-by-field. The deployed image still reports the documented
+`+unknown` fallback, so the value is currently a constant and
+`run_context()` records `"unavailable"` for it — a deployment gap, not an
+application one. Full record:
+[`asks/build-version-request.md`](asks/build-version-request.md).
+
+The original statement of the gap follows, because it is why the field
+exists.
 
 The application exposes no version of *itself*. `/api/health` returns only
 `{status, schema_version, eval_tracing}`; `schema_version` is an API contract
@@ -307,9 +344,11 @@ groups scores by label and shows the version fingerprint beside every delta.
 Comparison becomes a query instead of a UI hunt, costs no judge calls, and
 needs nothing from the application.
 
-**Ask the application for:** a build/commit identifier on `GET /api/health`.
-One field. Without it, some real regressions are indistinguishable from judge
-noise.
+**~~Ask the application for:~~ done** — `build_version` landed on
+`GET /api/health` on 2026-07-31. It reports its `+unknown` fallback on the
+deployed image, so until that image is built with its commit metadata the
+original caveat still applies in practice: some real regressions remain
+indistinguishable from judge noise.
 
 **Don't do yet:** CI gating on deltas (needs `judge-calibration.md`'s noise
 band first); Langfuse Datasets (needs a data-protection call, and the trigger

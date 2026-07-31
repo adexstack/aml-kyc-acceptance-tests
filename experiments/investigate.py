@@ -29,7 +29,9 @@ import re
 
 from jsonschema import Draft202012Validator
 
-from experiments.common import JUDGE_MODEL, api, item_input, load_scenarios, maybe_reset
+from experiments.common import (JUDGE_MODEL, api, app_latency, health, item_input,
+                                load_scenarios, maybe_reset, record_app_run, run_context,
+                                trace)
 
 _ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -147,6 +149,7 @@ def tool_correctness_experiment() -> dict:
             "actual_output": export["actual_output"],
             "tools_called": [{"tool": e["name"], "input_parameters": e["input_parameters"],
                               "output": e["output"]} for e in export["tools_called"]],
+            "app_run": record_app_run(investigation),
         }
 
     def _build_test_case(output, expected_output):
@@ -168,7 +171,8 @@ def tool_correctness_experiment() -> dict:
                                        should_consider_ordering=False, should_exact_match=False)
         metric.measure(tc)
         return Evaluation(name="tool_correctness_names", value=metric.score,
-                          comment=metric.reason)
+                          comment=metric.reason,
+                          metadata=run_context(output.get("app_run")))
 
     def tool_correctness_arguments(*, output, expected_output, **_kwargs):
         from deepeval.metrics import ToolCorrectnessMetric
@@ -182,10 +186,11 @@ def tool_correctness_experiment() -> dict:
                                        should_consider_ordering=False, should_exact_match=False)
         metric.measure(tc)
         return Evaluation(name="tool_correctness_arguments", value=metric.score,
-                          comment=metric.reason)
+                          comment=metric.reason,
+                          metadata=run_context(output.get("app_run")))
 
     return {"name": "aml-acceptance-tool-correctness", "data": data, "task": task,
-            "evaluators": [tool_correctness_names, tool_correctness_arguments]}
+            "evaluators": [tool_correctness_names, tool_correctness_arguments, app_latency]}
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +242,7 @@ def argument_correctness_experiment() -> dict:
             "actual_output": export["actual_output"],
             "tools_called": [{"tool": e["name"], "input_parameters": e["input_parameters"],
                               "output": e["output"]} for e in export["tools_called"]],
+            "app_run": record_app_run(investigation),
         }
 
     def argument_correctness(*, output, **_kwargs):
@@ -252,10 +258,11 @@ def argument_correctness_experiment() -> dict:
                                            include_reason=True, async_mode=False)
         metric.measure(tc)
         return Evaluation(name="argument_correctness", value=metric.score,
-                          comment=metric.reason)
+                          comment=metric.reason,
+                          metadata=run_context(output.get("app_run")))
 
     return {"name": "aml-acceptance-argument-correctness", "data": data, "task": task,
-            "evaluators": [argument_correctness]}
+            "evaluators": [argument_correctness, app_latency]}
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +291,8 @@ def bias_experiment() -> dict:
         investigation = api("POST", f"/api/cases/{i['case_id']}/investigate",
                             expect_status=201)
         return {"task": _investigation_task(i["case_id"]),
-                "rationale": investigation["rationale"]}
+                "rationale": investigation["rationale"],
+                "app_run": record_app_run(investigation)}
 
     def bias(*, output, **_kwargs):
         from deepeval.metrics import BiasMetric
@@ -297,10 +305,11 @@ def bias_experiment() -> dict:
         metric = BiasMetric(threshold=0.5, model=JUDGE_MODEL, include_reason=True,
                             async_mode=False)
         metric.measure(tc)
-        return Evaluation(name="bias", value=metric.score, comment=metric.reason)
+        return Evaluation(name="bias", value=metric.score, comment=metric.reason,
+                          metadata=run_context(output.get("app_run")))
 
     return {"name": "aml-acceptance-bias", "data": data, "task": task,
-            "evaluators": [bias]}
+            "evaluators": [bias, app_latency]}
 
 
 # ---------------------------------------------------------------------------
@@ -387,7 +396,8 @@ def prompt_alignment_experiment() -> dict:
                         for ref in investigation["evidence"]],
         }
         return {"task": _investigation_task(i["case_id"]),
-                "actual_output": json.dumps(assessment, indent=2)}
+                "actual_output": json.dumps(assessment, indent=2),
+                "app_run": record_app_run(investigation)}
 
     def prompt_alignment(*, output, **_kwargs):
         from deepeval.metrics import PromptAlignmentMetric
@@ -399,10 +409,11 @@ def prompt_alignment_experiment() -> dict:
                                        threshold=0.5, model=JUDGE_MODEL,
                                        include_reason=True, async_mode=False)
         metric.measure(tc)
-        return Evaluation(name="prompt_alignment", value=metric.score, comment=metric.reason)
+        return Evaluation(name="prompt_alignment", value=metric.score, comment=metric.reason,
+                          metadata=run_context(output.get("app_run")))
 
     return {"name": "aml-acceptance-prompt-alignment", "data": data, "task": task,
-            "evaluators": [prompt_alignment]}
+            "evaluators": [prompt_alignment, app_latency]}
 
 
 # ---------------------------------------------------------------------------
@@ -424,8 +435,7 @@ def plan_adherence_experiment() -> dict:
     s = load_scenarios()["s3"]
     case_id = s["case_id"]
 
-    health = api("GET", "/api/health")
-    if not health.get("eval_tracing"):
+    if not health().get("eval_tracing"):
         raise RuntimeError(
             "The application reports eval_tracing: false, so GET "
             "/api/agent/trace/{run_id} will return deepeval_trace: null. Re-verify Phase 0 "
@@ -446,10 +456,13 @@ def plan_adherence_experiment() -> dict:
         investigation = api("POST", f"/api/cases/{i['case_id']}/investigate",
                             expect_status=201)
         run_id = investigation["run_id"]
-        trace = api("GET", f"/api/agent/trace/{run_id}", role="eval_reader")
+        # Shared, cached fetch: the same trace also supplies the run's
+        # sampling temperature and its per-phase timings (experiments/
+        # common.py), so it is read once per run, not once per consumer.
+        agent_trace = trace(run_id)
         export = api("GET", f"/api/eval/export/{run_id}", role="eval_reader")
 
-        deepeval_trace = trace.get("deepeval_trace")
+        deepeval_trace = agent_trace.get("deepeval_trace")
         if not deepeval_trace:
             raise RuntimeError(
                 f"GET /api/agent/trace/{run_id} returned deepeval_trace: null even though "
@@ -459,22 +472,22 @@ def plan_adherence_experiment() -> dict:
         # Compose the declared (ex-ante) plan from API fields - see the
         # notebook for why the span tree alone is circular for this metric.
         declared_plan = [f"Retrieve supporting context for: {run['query']}"
-                          for run in trace["retrieval_runs"]]
+                          for run in agent_trace["retrieval_runs"]]
         declared_plan += [
             f"Call {sel['server']}.{sel['tool']} with {json.dumps(sel['arguments'])} "
             f"because {sel['reason']}"
-            for sel in trace["tools_selected"]
+            for sel in agent_trace["tools_selected"]
         ]
         declared_plan += [
             f"Deliberately skip {sk['server']}.{sk['tool']} because {sk['reason']}"
-            for sk in (trace["skipped_tools"] or [])
+            for sk in (agent_trace["skipped_tools"] or [])
         ]
         declared_plan.append(
             "Synthesize a risk assessment and a recommended action from the retrieved "
             "context and the tool results."
         )
 
-        if not trace["tools_selected"]:
+        if not agent_trace["tools_selected"]:
             raise RuntimeError(
                 "The trace reports no tools_selected, so there is no declared plan to "
                 "judge adherence against. On a repeat run for the same case the planner "
@@ -486,6 +499,7 @@ def plan_adherence_experiment() -> dict:
             "actual_output": export["actual_output"],
             "deepeval_trace": deepeval_trace,
             "declared_plan": declared_plan,
+            "app_run": record_app_run(investigation),
         }
 
     def plan_adherence(*, output, **_kwargs):
@@ -510,10 +524,11 @@ def plan_adherence_experiment() -> dict:
                 f"reason: {metric.reason}"
             )
 
-        return Evaluation(name="plan_adherence", value=metric.score, comment=metric.reason)
+        return Evaluation(name="plan_adherence", value=metric.score, comment=metric.reason,
+                          metadata=run_context(output.get("app_run")))
 
     return {"name": "aml-acceptance-plan-adherence", "data": data, "task": task,
-            "evaluators": [plan_adherence]}
+            "evaluators": [plan_adherence, app_latency]}
 
 
 EXPERIMENTS = [

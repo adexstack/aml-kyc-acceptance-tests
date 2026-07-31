@@ -12,7 +12,7 @@ executed end-to-end against a running API, not merely authored.
 | `mcp` version | `>=1.12,<1.28` (upper bound is load-bearing, see below) |
 | Judge model | `gpt-5.4-mini` by default, override with `DEEPEVAL_JUDGE_MODEL` |
 | Thresholds | DeepEval's documented default `0.5` for every metric |
-| Application | AML/KYC investigation API, `schema_version` `1.0.0`, seed `scenarios-v1` |
+| Application | AML/KYC investigation API, `schema_version` `1.1.0` (goldens authored against `1.0.0`; the bump was additive), seed `scenarios-v1` |
 
 All fourteen requested metric classes exist in DeepEval 4.1.4 under
 `deepeval.metrics` with the exact names requested. None was renamed, deprecated,

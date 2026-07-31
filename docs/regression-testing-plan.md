@@ -1,6 +1,12 @@
 # Regression testing — catching change over time, not just at a point
 
-**Status: design document. Nothing here has been installed or executed.**
+**Status: Phase 0 is built (2026-07-31)** — scores now persist to
+`results/scores.jsonl` and runs to `results/runs.jsonl`, and `compare_runs.py`
+compares two labelled runs and refuses when they are not comparable. See
+[`../plan.md`](../plan.md) §R0–R2 for what was built and
+[`regression_planning.md`](regression_planning.md) for the SDK-level findings
+behind it. Phases 1–3 below are still design.
+
 Read `observability-plan.md` first if you haven't — its Phase 1 (test-side
 Langfuse experiments) already solves the hard part of this problem for
 anyone willing to take the dependency. This doc is for the gap before that
@@ -31,7 +37,7 @@ change and erode trust in the whole suite fast.
 
 | Cause | Signature | How to tell |
 |---|---|---|
-| **Application actually regressed** | Score drop correlated with an app deploy/version | Compare against `TraceResponse.model` / `model_configuration` / `prompt_version`, already returned by `GET /api/agent/trace/{run_id}` — a real per-run version fingerprint, no app change needed to get it |
+| **Application actually regressed** | Score drop correlated with an app deploy/version | Compare against `model` / `model_configuration` / `prompt_version` (returned inline by the investigate and query responses, and by `GET /api/agent/trace/{run_id}`) plus `build_version` on `GET /api/health` — added 2026-07-31 at this repo's request, and the only one of them that moves when retrieval logic, a tool implementation or a threshold changes. `compare_runs.py` prints all of them beside every delta |
 | **Judge noise** | Score drop within the variance band `judge-calibration.md` Phase 1 measures, no version change | Compare against that band before calling anything a regression |
 | **Environment drift** | Seed data or policy corpus changed under the goldens | Already partially guarded: `AML_EXPECTED_SEED_VERSION` and `schema_version` checks fail loudly at notebook start. Golden text staleness (documented in `metric-notes.md` for `ContextualPrecision`/`Recall`) is not yet guarded automatically |
 
@@ -41,7 +47,16 @@ that moved.
 
 ## 3. What to build, ordered by value
 
-### Phase 0 — Persist what you already compute (no application change, do this regardless of Langfuse)
+### Phase 0 — Persist what you already compute — **done 2026-07-31**
+
+Built as `results/scores.jsonl` (one row per score, written by
+`compare_runs.py`) and `results/runs.jsonl` (one row per experiment, written
+by `run_experiment.py`, carrying the `experiment_id` join key). Both are
+gitignored JSONL, greppable with no dashboard login, and `compare_runs.py
+--offline` reads the former when Langfuse is unreachable. The original
+statement of the phase follows.
+
+
 
 Every notebook already produces a score, a reason, and (via
 `GET /api/agent/trace/{run_id}`) a `run_id`, `model`, `prompt_version`, and

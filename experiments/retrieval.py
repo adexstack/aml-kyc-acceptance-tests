@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import re
 
-from experiments.common import JUDGE_MODEL, api, item_input, load_scenarios, maybe_reset
+from experiments.common import (JUDGE_MODEL, api, app_latency, item_input, load_scenarios,
+                                maybe_reset, record_app_run, run_context)
 
 _QUERY = (
     "What indicators identify structuring, and what cash transaction thresholds "
@@ -81,9 +82,15 @@ def _build(name: str, metric_evaluator) -> dict:
         return {
             "query": retrieval["query"],
             "retrieval_context": [chunk["text"] for chunk in retrieval["chunks"]],
+            # No LLM runs on this path, so the fingerprint records
+            # "not_applicable" for model/prompt_version - a different
+            # statement from "unavailable". app_latency_ms is still real
+            # and is retrieval time alone, with no synthesis in it.
+            "app_run": record_app_run(retrieval),
         }
 
-    return {"name": name, "data": data, "task": task, "evaluators": [metric_evaluator]}
+    return {"name": name, "data": data, "task": task,
+            "evaluators": [metric_evaluator, app_latency]}
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +110,8 @@ def contextual_precision_experiment() -> dict:
                           retrieval_context=output["retrieval_context"])
         metric.measure(tc)
         return Evaluation(name="contextual_precision", value=metric.score,
-                           comment=metric.reason)
+                           comment=metric.reason,
+                           metadata=run_context(output.get("app_run")))
 
     return _build("aml-acceptance-contextual-precision", contextual_precision)
 
@@ -125,7 +133,8 @@ def contextual_recall_experiment() -> dict:
                           retrieval_context=output["retrieval_context"])
         metric.measure(tc)
         return Evaluation(name="contextual_recall", value=metric.score,
-                           comment=metric.reason)
+                           comment=metric.reason,
+                           metadata=run_context(output.get("app_run")))
 
     return _build("aml-acceptance-contextual-recall", contextual_recall)
 

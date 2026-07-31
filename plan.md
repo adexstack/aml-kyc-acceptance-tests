@@ -1,6 +1,6 @@
 # Regression, observability and monitoring — phased implementation plan
 
-**Status: implementation plan. Nothing in Phases R0–R6 has been built yet.**
+**Status: R0, R1 and R2 are built (2026-07-31). R3–R6 are not.**
 Written 2026-07-31. Supersedes the previous contents of this file, which
 were the Phase 0/1 Langfuse bring-up and are archived verbatim at
 [`docs/archive/Langfuse-observability-plan.md`](docs/archive/Langfuse-observability-plan.md)
@@ -100,6 +100,19 @@ Two further constraints found the same way:
   every experiment span's environment to the constant `"sdk-experiment"`,
   overriding `Langfuse(environment=…)` and `LANGFUSE_TRACING_ENVIRONMENT`.
   Any design that labels runs by environment silently does nothing.
+
+  **And it is worse than that — measured 2026-07-31.** Spans and scores do
+  not even agree on the value:
+
+  ```
+  observations view : environment = "sdk-experiment"
+  scores-numeric    : environment = "default"
+  ```
+
+  So a scores widget filtered to `sdk-experiment` returns **nothing at all**,
+  and an observations widget filtered to `default` likewise. This is the
+  concrete reason for §5's "do not add environment filters" rule — it is not
+  merely uninformative, it silently empties the chart.
 - **`observationPromptVersion` / `observationPromptName` come from Langfuse
   prompt *linking*,** not from arbitrary strings. Using them would mean
   adopting Langfuse prompt management for application prompts, which
@@ -118,18 +131,36 @@ So: **`release` = the run label.** Set once per process via
 group by must go there; everything else is metadata for scripts and
 drill-down.
 
-> **Verification gate before building R3.** The `release` mechanism is
-> **source-verified, not yet runtime-verified.** `_init_tracer_provider`
-> only configures a provider when the global one is still a
-> `ProxyTracerProvider`, so a pre-existing provider could drop the attribute.
-> Do one throwaway run and confirm in the Langfuse UI that `traceRelease` is
-> populated and groupable **before** building any dashboard on it. If it is
-> not, fall back to encoding the label in the **trace name** (`traceName` is
-> also a groupable dimension) and record that here.
+> **Verification gate before building R3: PASSED, runtime-verified
+> 2026-07-31.** Three labelled runs (`verify-a/b/c`) were queried through the
+> Metrics API itself, not just the UI:
+>
+> ```
+> view=scores-numeric, dimensions=[traceRelease, name], metrics=[avg(value)]
+> -> {'traceRelease': 'verify-a', 'name': 'app_latency_ms', 'avg_value': 9509}
+>    {'traceRelease': 'verify-b', 'name': 'app_latency_ms', 'avg_value': 7684}
+>    {'traceRelease': 'verify-c', 'name': 'tool_correctness_names', 'avg_value': 1}
+>    ...
+> ```
+>
+> `release` set on the client does reach `traceRelease`, and it groups. R3 is
+> unblocked whenever someone decides a dashboard is worth having (§11.5).
+>
+> **The `traceName` fallback would not have worked**, so it was fortunate
+> rather than redundant: every score in every run reports
+> `traceName = "experiment-item-run"` (and the score export reports it as
+> `null` outright). It is a constant, not a per-run key. Had the `release`
+> gate failed, the fallback would have needed custom trace naming first —
+> record that if this is ever revisited.
 
 ---
 
 ## 2. Phase R0 — Make every run identifiable *and* self-describing
+
+**Built 2026-07-31.** `experiments/common.py` (`RUN_LABEL`, `health()`,
+`check_schema_version()`, `trace()`, `record_app_run()`, `run_context()`,
+`last_app_run()`), `run_experiment.py` (`release`, `run_name`,
+`results/runs.jsonl`).
 
 **Bucket 1** (test-side). No application change. Cost: zero extra judge
 calls.
@@ -157,9 +188,21 @@ categories S4 depends on:
 **Application axes** (change ⇒ comparable, and this is the signal):
 `app_model`, `app_prompt_version`, `app_temperature`, `app_build` (see R0.4).
 
-Sourced from `GET /api/agent/trace/{run_id}` (`model`, `prompt_version`,
-`model_configuration`) — verified live 2026-07-31, no application change
-needed. Values must be flat strings; metadata is flattened on export.
+**Cheaper than this section assumed, as built:** `model`, `prompt_version`
+and `latency_ms` are returned *inline* by `InvestigateResponse` and
+`QueryResponse`, in the responses each task already fetches, and
+`RetrieveResponse` returns `retrieval_run_id` and `latency_ms`. So
+`record_app_run(response)` costs **no extra call at all**. Only
+`model_configuration.temperature` and the per-phase latency split need
+`GET /api/agent/trace/{run_id}`, which is fetched lazily and cached per run
+— still within the "one extra read per run" budget in §10.
+
+Values must be flat strings; metadata is flattened on export.
+
+`"unavailable"` and `"not_applicable"` are different statements and are not
+interchangeable: the retrieval-only path (`POST /api/rag/retrieve`) runs no
+LLM, so it has no model or prompt version — that is `"not_applicable"`.
+`"unavailable"` means a field that should exist could not be read.
 
 **Fail loudly:** if a fingerprint field is absent, record the literal
 `"unavailable"`. Never omit the key and never guess — a comparison that
@@ -177,6 +220,20 @@ This is `regression-testing-plan.md` Phase 0, which that doc says to do
 the whole thing debuggable when the dashboard disagrees with your memory.
 
 ### R0.4 Application ask (Bucket 2) — one field
+
+**Delivered 2026-07-31.** `GET /api/health` now returns
+`build_version` (string, `"<version>+<short SHA>"`, documented in
+`/openapi.json`), and `schema_version` moved to `1.1.0`. The bump was
+verified additive — the whole old-vs-new OpenAPI diff is that one field.
+
+**But the deployed image reports the documented `+unknown` fallback**, i.e.
+it was built without git metadata, so the value is currently a constant.
+`app_build()` therefore records it as `"unavailable"`, and R2 keeps its
+"application changes may be invisible" warning. Both clear themselves once
+the image is built with its commit. Full verification record:
+[`docs/asks/build-version-request.md`](docs/asks/build-version-request.md).
+
+The original statement of the gap, kept because it is why the field exists:
 
 The application exposes **no build identifier**. `/api/health` returns only
 `{status, schema_version, eval_tracing}`. `prompt_version` and `model` are
@@ -199,11 +256,15 @@ left to the application team.
 
 **Exit criteria:** two runs with different `AML_RUN_LABEL` produce scores
 distinguishable by `traceRelease` in the Langfuse UI, and `results/runs.jsonl`
-has two rows.
+has two rows. **Met 2026-07-31** — `verify-a`/`verify-b`/`verify-c`, three
+manifest rows, and `traceRelease` groupable through the Metrics API (§1).
 
 ---
 
 ## 3. Phase R1 — Emit the comparables, including honest latency
+
+**Built 2026-07-31.** All 17 `Evaluation(...)` sites stamped with
+`run_context(...)`; `common.app_latency` attached as a shared evaluator.
 
 **Bucket 1.** No application change. Cost: unchanged for quality scores;
 **zero additional** for latency (read from data already returned).
@@ -252,17 +313,37 @@ for and currently throws away — and it makes S3 a first-class comparable
 rather than an inference. Percentiles (`p50`/`p95`) come free from the
 Metrics API aggregations, satisfying that doc's Phase 1 without extra code.
 
+**Two deliberate exclusions, as built:**
+
+- A phase score is emitted only when the run has steps of that type. A run
+  that called no tools has no tool-call latency; recording `0` would be a
+  fabricated measurement, not a fast one.
+- `TurnRelevancy` emits **no** latency score. Its task makes three
+  application calls and none of them is "the" run the metric is about;
+  publishing one turn's latency under the same score name as every other
+  metric's whole-run latency, or summing three turns into one number, would
+  both be fabricated comparables. The `ToolUse`/`MultiTurnMCPUse`
+  conversations do have one — the investigation; the two MCP probes around
+  it are the harness's own additions and are not counted.
+
 **Do not** add synthetic load or timing probes here. Load/stress testing
 against this live production instance remains out of scope and requires
 separate explicit authorization (`CLAUDE.md`, `performance-latency-plan.md`
 §4).
 
 **Exit criteria:** one run produces both quality and `app_latency_*` scores,
-all carrying `traceRelease` and full metadata.
+all carrying `traceRelease` and full metadata. **Met 2026-07-31** — one
+`tool_correctness` run emitted `tool_correctness_names`,
+`tool_correctness_arguments`, `app_latency_ms`, `app_latency_tool_call_ms`
+and `app_latency_synthesis_ms` (no `app_latency_retrieval_ms`: that run had
+no timed retrieval step, and an absent score is the honest result).
 
 ---
 
 ## 4. Phase R2 — The comparability guard (`compare_runs.py`)
+
+**Built 2026-07-31.** `compare_runs.py` at repo root:
+`--since`/`--runs`/`--list`/`--force`/`--offline`.
 
 **Bucket 1. This is S4, and it is the phase that must not be cut.**
 Read-only; **zero judge calls**; safe to run as often as you like — which is
@@ -320,11 +401,33 @@ just two, so trends are visible.
 ### R2.3 Also write Phase-0 history
 
 Append every score to `results/scores.jsonl`. Gives a `grep`-able artifact
-with no dashboard login, and lets R2 work when Langfuse is unreachable.
+with no dashboard login, and lets R2 work when Langfuse is unreachable
+(`--offline` reads exactly that file).
+
+**Two guards added while building, both cheap and both catching a failure
+that otherwise reads as a quality change:**
+
+- A label whose scores disagree with each other on a measurement axis is
+  reported as `MIXED:` and refused — that is one label covering two
+  different configurations, not one run.
+- Score counts are printed per run, and a metric present in one run and
+  absent in the other is called out as an incomplete run rather than shown
+  as a delta.
 
 **Exit criteria:** comparing two deliberately-mismatched runs refuses with a
 specific message and non-zero exit; comparing two matched runs prints a
-delta table with app attribution.
+delta table with app attribution. **Met 2026-07-31** — `verify-a` vs
+`verify-b` (same axes) printed the table; `verify-a` vs `verify-c` (judge
+model changed) refused, naming `judge_model`, and exited 2. `--force` and
+`--offline` both exercised.
+
+**One measurement worth carrying into R6:** `verify-a` and `verify-b` are
+two runs of the *same* metric against the *unchanged* application, and their
+`app_latency_ms` differs by 19% (9509 → 7684 ms). Quality scores were
+identical (1.000, a deterministic metric), but latency is visibly noisy
+run to run. Any latency threshold set without measuring that spread first
+will fire on ordinary variance — the same argument §R6 makes for judge
+scores applies to latency, and the noise band has to cover both.
 
 ---
 
@@ -353,8 +456,9 @@ change**; if it churns, defining dashboards in the UI and documenting them
 here is an acceptable, honest fallback rather than a maintenance burden.
 
 **Caution:** widget-level environment filters override the dashboard-level
-selector. Since every experiment score is force-set to `sdk-experiment`, do
-not add environment filters at all — they can only mislead here.
+selector. **Do not add environment filters at all.** Measured 2026-07-31:
+spans report `sdk-experiment` but scores report `default`, so an environment
+filter on a scores widget does not narrow the chart — it empties it. See §1.
 
 **PII:** dashboards aggregate scores (numbers, and judge `comment` strings).
 No new category of data leaves the machine beyond what
@@ -526,8 +630,9 @@ apply in full.
 
 ## 11. Open items to resolve before/while building
 
-1. **Verify `release` → `traceRelease`** end to end (gate on R3). Fallback:
-   `traceName`.
+1. ~~**Verify `release` → `traceRelease`** end to end (gate on R3).~~
+   **Passed 2026-07-31**, verified through the Metrics API rather than the
+   UI — see §1. No `traceName` fallback needed.
 2. ~~**`PlanAdherenceMetric` appears unblocked.**~~ **Verified passing end to
    end 2026-07-31** (`run_all.py PlanAdherence` with
    `AML_RESET_BEFORE_RUN=true` → `1/1 notebooks passed`, 65s). `README.md`,
@@ -545,9 +650,18 @@ apply in full.
    **this verification produced a pass/fail and no recorded score.** The
    number that would let anyone check this claim later does not exist
    anywhere — which is precisely what `results/scores.jsonl` is for.
-3. **Ask for `build_version` on `/api/health`** (R0.4). Written up and ready
-   to send: [`docs/asks/build-version-request.md`](docs/asks/build-version-request.md).
-   Until it lands, some app changes are invisible to attribution.
+3. ~~**Ask for `build_version` on `/api/health`**~~ (R0.4). **Delivered and
+   verified 2026-07-31** — field present, documented in `/openapi.json`,
+   stable across calls, no measurable cost to the endpoint, and the
+   `schema_version` 1.0.0 → 1.1.0 bump confirmed additive field-by-field.
+
+   **Still open, and it is a deployment matter, not an application one:** the
+   running image reports the documented `+unknown` fallback, so the field is
+   currently a constant and carries no build identity. `app_build()` records
+   `"unavailable"` for it and R2 keeps warning that app changes may be
+   invisible. Both resolve themselves once the image is built with its
+   commit metadata. Record:
+   [`docs/asks/build-version-request.md`](docs/asks/build-version-request.md).
 4. **Confirm the PII position on judge `comment` strings** with whoever owns
    data protection before widening dashboard access (R3).
 5. **Decide who else needs to see this.** If the answer stays "only the
@@ -575,7 +689,10 @@ comparable.
 
 **Nothing here needs an application change** — except the one small,
 worthwhile ask for a build identifier, without which some regressions are
-genuinely unattributable.
+genuinely unattributable. That ask was delivered on 2026-07-31; the field
+exists and is documented, but the deployed image reports its `+unknown`
+fallback, so in practice attribution is still missing that axis until the
+image is built with its commit metadata.
 
 **Do not gate CI on any of this until R6 measures the noise band.** Report
 first; judge later.

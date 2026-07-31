@@ -64,13 +64,27 @@ reachability before running anything:
 
 ```bash
 curl -s "$AML_API_BASE_URL/api/health"
-# {"status":"ok","schema_version":"1.0.0","eval_tracing":true}
+# {"status":"ok","schema_version":"1.1.0","eval_tracing":true,"build_version":"0.1.0+unknown"}
 ```
 
 Every notebook performs this check itself in its configuration cell and stops
-with a specific message if the application is unreachable, the schema version
-differs, or the seed version does not match the one the goldens were authored
-against.
+with a specific message if the application is unreachable, the contract
+version is incompatible, or the seed version does not match the one the
+goldens were authored against.
+
+Two fields on that payload matter to more than reachability:
+
+- **`schema_version`** is the API contract version. These tests were written
+  against `1.0.0` and accept any `1.x`: a MINOR bump is additive by the
+  application's own contract policy. A MAJOR change raises, because fields
+  may have been removed or retyped.
+- **`build_version`** identifies the deployed code, and is what makes a score
+  change attributable to an application change rather than judge noise. The
+  application documents `"<version>+unknown"` as its fallback when the image
+  was built without git metadata — a constant, which is why this harness
+  records it as `unavailable` rather than as a build identity. If you see
+  `+unknown`, the build is not passing its commit into the image; see
+  [docs/asks/build-version-request.md](docs/asks/build-version-request.md).
 
 ## Running
 
@@ -211,6 +225,46 @@ to the variables above. It applies the same PII-masking function to
 everything it sends and refuses to run unless `AML_API_BASE_URL` resolves to
 an instance serving the known synthetic seed data — see
 `docs/observability-plan.md` §5 for the PII stance this repo holds itself to.
+
+### Comparing runs
+
+Label a run and its scores become comparable later; leave it unlabelled and
+they get a UTC timestamp, which is only useful if you remember which
+timestamp was which.
+
+```bash
+AML_RUN_LABEL=before-planner-fix AML_RESET_BEFORE_RUN=true \
+  uv run python run_experiment.py
+# ... change the application ...
+AML_RUN_LABEL=after-planner-fix AML_RESET_BEFORE_RUN=true \
+  uv run python run_experiment.py
+
+uv run python compare_runs.py --list                 # what labels exist
+uv run python compare_runs.py --runs before-planner-fix after-planner-fix
+uv run python compare_runs.py --offline              # from results/scores.jsonl
+```
+
+`compare_runs.py` is read-only and costs **no judge calls** — it queries
+stored scores and prints a table, so run it as often as you like. It
+**refuses, with a non-zero exit, when the two runs are not comparable**: a
+different judge model, seed version, contract version, reset setting,
+harness commit or scenario count means the instrument moved rather than the
+thing being measured. `--force` overrides that and labels every row `UNSAFE`.
+
+`AML_RESET_BEFORE_RUN=true` is not optional for a comparison run — the
+planner skips tools already completed for a case, so a reset run and an
+un-reset one produce different tool plans for reasons unrelated to quality.
+Note that reset **drops and recreates every table** on the target instance,
+once per investigate-based metric.
+
+Each run also appends to two gitignored files: `results/runs.jsonl` (one row
+per experiment, with the `experiment_id` join key and the run's fingerprint)
+and `results/scores.jsonl` (every score `compare_runs.py` has read). Both are
+plain JSONL you can `grep` without a dashboard login.
+
+`!!` in the output means "worth a look", not "failed": the judge-noise band
+(`docs/judge-calibration.md` Phase 1) does not exist yet, so nothing here
+gates anything. See `plan.md` §R6.
 
 ### CI: on-demand dispatch via a self-hosted runner
 
