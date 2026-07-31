@@ -227,10 +227,41 @@ something a portable copy of this repo needs.
 self-hosted runner is a process that polls GitHub, not an always-on service
 GitHub provides. If nothing is listening, `workflow_dispatch` just sits at
 "Waiting for a runner to pick up this job..." indefinitely, with no error.
-It runs as a `launchd` background service (`./svc.sh install && ./svc.sh
-start` in `actions-runner-local`, not foreground `./run.sh`) so it survives
-closing the terminal and restarts at login — see `plan.md` §1.7 for setup
-and current status.
+It runs as a `launchd` background service (`./svc.sh`, not foreground
+`./run.sh`) so it survives closing the terminal and restarts at login — see
+`plan.md` §1.7 for registration details and current status.
+
+#### Controlling the runner service
+
+`svc.sh` lives in the runner's own installation directory, **not** in this
+repository. Every command below must be run from that directory — the script
+resolves the runner root from the current working directory (`pwd`), so
+running it from anywhere else either fails outright or, on `install`, bakes
+the wrong path into the launchd job:
+
+```bash
+cd ~/seyi/AI-LLM/actions-runner-local   # wherever your runner was unpacked
+./svc.sh status
+```
+
+| Command | What it does |
+|---|---|
+| `./svc.sh status` | Prints the plist path and `Started` / `Stopped`, or `not installed` if the service was never installed. Use this first — it answers "is a dispatch going to be picked up?" |
+| `./svc.sh start` | Loads the launchd job and starts polling GitHub. Run this after a `stop`. |
+| `./svc.sh stop` | Unloads the job. The runner stops polling; dispatches queue at "Waiting for a runner…" until it's started again. |
+| `./svc.sh install` | **One-time only.** Creates `~/Library/LaunchAgents/actions.runner.*.plist`, the log directory, and `runsvc.sh`. |
+| `./svc.sh uninstall` | Stops the service and deletes the plist. Only needed when retiring or relocating the runner. |
+| `./svc.sh` (no argument) | Prints usage. There is no `help` subcommand — any unrecognised argument prints the same usage text. |
+
+**Do you have to run `install` every time? No.** `install` is a one-time
+setup step. It refuses to run again if the plist already exists, failing with
+`error: exists /Users/<you>/Library/LaunchAgents/actions.runner.*.plist`, and
+that error is expected, not a problem to fix. Once installed, the service
+restarts automatically at login, so day-to-day you only ever need `status`,
+`stop`, and `start`. Re-run `install` only after an `uninstall`, or if you
+move the runner directory — the installed plist hard-codes the path it was
+installed from, so a moved runner needs `uninstall` then `install` from the
+new location.
 
 ## How trace-dependent metrics obtain internal data
 
