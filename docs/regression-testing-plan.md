@@ -9,7 +9,7 @@ you have it.
 
 ## 1. What "regression" means for this suite today, and why that's thin
 
-Right now, a regression test is: run the suite, read `13/14 notebooks
+Right now, a regression test is: run the suite, read `14/14 notebooks
 passed`, done. That tells you today's state. It cannot tell you:
 
 - whether a score that's still above threshold nonetheless dropped
@@ -115,10 +115,18 @@ affordable; per-commit isn't, for the same reason `gpt-5.4-mini` is the
 default judge. If you need faster feedback on one specific metric during
 active work on it, run that one notebook, not the suite.
 
-### Don't try to regression-test `PlanAdherenceMetric` before it's unblocked
+### Don't let `PlanAdherenceMetric`'s unblocking pollute a baseline
 
-It's blocked for a reason unrelated to any of this (`metric-notes.md`) — no
-history mechanism fixes a metric that has no data to score against.
+**Unblocked 2026-07-31** (`metric-notes.md`) — it now scores. The original
+warning here was that no history mechanism fixes a metric with no data to
+score against; that's resolved.
+
+The live concern is now the opposite one. A metric that has just come online
+will look like a dramatic improvement against any earlier baseline, because
+the comparison is between "not scored" and "scored" — not between two
+measurements of quality. **Start its history fresh** rather than reading a
+delta across the unblock boundary, and treat its first few runs as
+establishing a baseline, not as evidence of a change.
 
 ## 5. Honest summary
 

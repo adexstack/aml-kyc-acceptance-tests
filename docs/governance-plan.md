@@ -84,8 +84,9 @@ correctness one.
 - **Enforcing access control.** Phase 0 above *tests* that role boundaries
   hold; it does not implement them. If Phase 0 finds a role boundary that
   doesn't hold, the fix is an application change, reported the same way
-  `metric-notes.md` reports `PlanAdherenceMetric`'s blocker — named
-  precisely, not designed from here.
+  `metric-notes.md` reported `PlanAdherenceMetric`'s blocker — named
+  precisely, not designed from here. (That one was named that way and
+  subsequently fixed upstream, 2026-07-31 — the pattern works.)
 
 ## 4. What not to do
 
@@ -137,5 +138,7 @@ black-box test cannot see.
 **Depends on a decision only you can make:** whether Phase 0's role-boundary
 failures (if any turn up) get reported and fixed upstream on the timeline
 you'd want for a compliance-relevant access-control gap, or whether they sit
-in a backlog like `PlanAdherenceMetric` has. That's a severity call, not a
-technical one.
+in a backlog. That's a severity call, not a technical one. For calibration:
+`PlanAdherenceMetric`'s blocker was named here on 2026-07-29 and fixed
+upstream by 2026-07-31 — a reasonable turnaround for a non-urgent test gap,
+but an access-control finding would warrant faster.

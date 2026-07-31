@@ -113,17 +113,25 @@ to compare against history.
 
 ### 3.3 Do not expect Langfuse to unblock `PlanAdherenceMetric`
 
-It will not. That metric is blocked because the backend image omits the `eval`
-extra, so `deepeval` is not importable, `configure_tracing()` returns `False`,
-and `GET /api/agent/trace/{run_id}` serves `deepeval_trace: null`
-(`docs/known-issues.md`). `PlanAdherenceMetric` consumes **DeepEval's own trace
-format**. Langfuse traces are a different shape and will not satisfy it.
+**Resolved 2026-07-31 — and resolved the way this section predicted.** The
+metric was blocked because the backend image omitted the `eval` extra, so
+`deepeval` was not importable, `configure_tracing()` returned `False`, and
+`GET /api/agent/trace/{run_id}` served `deepeval_trace: null`. The
+application now reports `eval_tracing: true` and serves a declared plan; see
+`metric-notes.md` for the current implementation.
 
-Langfuse lets you *sidestep* the blocker by writing your own plan-adherence
-check as a code evaluator over Langfuse spans — but that is a different metric
-you would own and maintain, not the DeepEval one. The one-line fix
-(`uv sync --frozen --no-dev --extra eval` in the backend image) remains the
-cheapest path to the requested metric.
+**The advice stands, and is worth keeping.** It was fixed by the one-line
+application change (installing the `eval` extra), *not* by adopting Langfuse
+— which is exactly what this section said would happen.
+`PlanAdherenceMetric` consumes **DeepEval's own trace format**; Langfuse
+traces are a different shape and would never have satisfied it. Writing a
+bespoke plan-adherence check as a code evaluator over Langfuse spans would
+have produced a different metric you then own and maintain, while leaving
+the requested one still blocked.
+
+Generalise it rather than deleting it: **when a metric is blocked on data
+the application does not expose, adding an observability platform does not
+unblock it.** Only the application exposing the data does.
 
 ---
 
@@ -309,15 +317,17 @@ What the docs offer, and what each is actually worth:
 
 ## 6. What I would actually do, in order
 
-1. **Fix `PlanAdherenceMetric` first** (`--extra eval` in the backend image).
-   One line, unblocks a requested metric, unrelated to Langfuse. Do not let a
-   platform project delay it.
+1. ~~**Fix `PlanAdherenceMetric` first**~~ (`--extra eval` in the backend
+   image). **Done 2026-07-31** — the application now reports `eval_tracing:
+   true` and serves a declared plan. One line, unblocked a requested metric,
+   unrelated to Langfuse, and correctly not delayed by the platform work.
 2. **Settle the PII question** with whoever owns data protection. Everything
    below depends on the answer, and discovering the answer late wastes the work.
 3. **Phase 1, one metric, one scenario.** Prove the loop end to end: a run
    appears in Langfuse, a score is attached, a second run is comparable to the
    first. Timebox it — if the SDK fights you, that is data about the cost.
-4. **Extend to all metrics that pass today** (13 of 14). Keep `run_all.py` as
+4. **Extend to all metrics that pass today** (all 14, since
+   `PlanAdherenceMetric` was unblocked — was 13 of 14). Keep `run_all.py` as
    the portable, offline path; add `run_experiment.py` as the CI path. Never let
    the notebooks depend on Langfuse.
 5. **Wire it into CI** on a schedule, not per-commit — each run costs real LLM
@@ -352,7 +362,9 @@ over correlating on `run_id`).
 **Not valuable, or actively harmful here:** Langfuse prompt management for
 application prompts; replacing DeepEval's agentic metrics with Langfuse's
 generic judges; putting Langfuse inside the fourteen notebooks; expecting
-Langfuse to unblock `PlanAdherenceMetric`.
+Langfuse to unblock `PlanAdherenceMetric` (§3.3 — borne out: it was
+unblocked 2026-07-31 by the one-line application change, not by any
+observability tooling).
 
 **The main risk is not technical.** It is exporting AML screening outcomes about
 named individuals to a third-party service because tracing was switched on

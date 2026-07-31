@@ -64,7 +64,7 @@ reachability before running anything:
 
 ```bash
 curl -s "$AML_API_BASE_URL/api/health"
-# {"status":"ok","schema_version":"1.0.0","eval_tracing":false}
+# {"status":"ok","schema_version":"1.0.0","eval_tracing":true}
 ```
 
 Every notebook performs this check itself in its configuration cell and stops
@@ -114,13 +114,38 @@ uv run python run_all.py
 --> AnswerRelevancyMetric.ipynb
     PASS  (34s)
 ...
+14/14 notebooks passed
+```
+
+**14 of 14 is the expected result against an instance reporting
+`eval_tracing: true`, run with `AML_RESET_BEFORE_RUN=true`.**
+`PlanAdherenceMetric` was previously blocked; it was unblocked and verified
+passing on 2026-07-31. (The other 13 were last verified before that date —
+see `docs/metric-notes.md` for exactly what has been observed and when.)
+
+Two things reliably turn that into a lower number, neither of which is a
+defect:
+
+Without a reset, the metrics that depend on first-run planner behaviour fail
+loudly rather than scoring, because the planner skips tools already
+completed for a case:
+
+```
+    FAIL  PlanAdherenceMetric.ipynb: RuntimeError: The trace reports no tools_selected,
+    so there is no declared plan to judge adherence against. On a repeat run for the
+    same case the planner skips tools it already completed - set
+    AML_RESET_BEFORE_RUN=true and re-run.
+```
+
+And against an instance *without* agent tracing, `PlanAdherenceMetric` still
+fails by design, with an explicit message rather than a score:
+
+```
 13/14 notebooks passed
   FAILED  PlanAdherenceMetric.ipynb: RuntimeError: The application reports eval_tracing: false, ...
 ```
 
-**13 of 14 passing is the current expected result.** `PlanAdherenceMetric` fails
-by design on an application instance that does not expose agent traces - see
-below. Inside each notebook, expect the request, the raw response, the mapped
+Inside each notebook, expect the request, the raw response, the mapped
 DeepEval fields, the derived golden, and then the score with the judge's reason.
 
 A metric scoring below its threshold is a **reported result, not a crash**: the
@@ -133,7 +158,7 @@ served corpus.
 
 | Metric | State |
 |---|---|
-| `PlanAdherenceMetric` | **Blocked.** Needs the agent's declared plan, which requires `eval_tracing: true`. The deployed backend image does not install the `eval` extra, so `deepeval` is absent, `configure_tracing()` returns false, and `GET /api/agent/trace/{run_id}` serves `deepeval_trace: null`. Fixing this is an application change |
+| `PlanAdherenceMetric` | **Unblocked 2026-07-31.** Was blocked while the backend image omitted the `eval` extra, leaving `deepeval_trace: null`. The application now reports `eval_tracing: true` and serves a declared plan. Still raises, rather than scoring, against any instance with tracing off |
 | `MultiTurnMCPUseMetric` | **Limited by a dependency pin.** `mcp` must stay `<1.28`; 1.28 renamed `structuredContent`, which DeepEval 4.1.4 still reads |
 | `SummarizationMetric` | **Limited.** No dedicated summarisation endpoint exists; a RAG answer over a known policy document stands in |
 | `BiasMetric` | **Limited.** One case cannot demonstrate disparate treatment; it checks the language of a single output |
@@ -216,7 +241,7 @@ calls, retrieval context - read it from documented endpoints only:
 |---|---|
 | Tools called and their arguments | `GET /api/eval/export/{run_id}` (`tools_called[]`) |
 | Executed step timeline | `GET /api/agent/trace/{run_id}` (`steps[]`) |
-| Declared plan | `GET /api/agent/trace/{run_id}` (`deepeval_trace`) - **currently null** |
+| Declared plan | `GET /api/agent/trace/{run_id}` - `tools_selected[]` and `skipped_tools[]` (each with the agent's `reason`) plus `retrieval_runs[].query`, gated on a non-null `deepeval_trace` |
 | MCP servers and tool schemas | `GET /api/mcp/servers`, `GET /api/mcp/tools` |
 | Individual tool results | `POST /api/mcp/invoke` |
 | Retrieval context | `POST /api/rag/retrieve` (`chunks[]`) |
@@ -253,7 +278,7 @@ of inferring internals from the final answer.
 | `Seed version mismatch` | The instance was seeded differently from the goldens. Reseed it, or set `AML_EXPECTED_SEED_VERSION` if you know the goldens still hold |
 | `The golden below cites clauses that are not in the document the API serves` | The policy corpus changed. The comparison already ignores line breaks and repeated spaces, so the wording itself is gone. Update the golden from the current document text |
 | `The trace reports no tools_selected` on a repeat run | The planner skips tools already completed for that case. Set `AML_RESET_BEFORE_RUN=true` |
-| `eval_tracing: false` | Expected on an instance without the `eval` extra installed. Blocks `PlanAdherenceMetric` only |
+| `eval_tracing: false` | The instance was built without the `eval` extra, or runs with `ENVIRONMENT=production` (which ignores tracing entirely). Blocks `PlanAdherenceMetric` only. No longer the expected state - the reference instance reports `true` as of 2026-07-31 |
 | Request timeouts on investigation endpoints | An investigation runs several tools plus an LLM call. Raise `AML_API_TIMEOUT_S` |
 
 ### Repeat runs

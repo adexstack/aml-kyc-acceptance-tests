@@ -1,596 +1,581 @@
-# Langfuse observability — implementation plan
+# Regression, observability and monitoring — phased implementation plan
 
-**Status: implementation plan, phases 0–1 not yet started.** This turns
-[`docs/observability-plan.md`](docs/observability-plan.md) into an ordered,
-gated build sequence. Read that document first — this one assumes its
-analysis and doesn't re-argue it. Where a phase touches the backend
-(`aml-kyc-agentic-platform`, a separate repository this harness has no
-access to), this plan states exactly what to change and how to verify it,
-but the change itself must be made and confirmed by you in that repository.
-**No phase whose "Depends on" column names an earlier phase should start
-before that phase is confirmed done**, per the table in §0.
+**Status: implementation plan. Nothing in Phases R0–R6 has been built yet.**
+Written 2026-07-31. Supersedes the previous contents of this file, which
+were the Phase 0/1 Langfuse bring-up and are archived verbatim at
+[`docs/archive/Langfuse-observability-plan.md`](docs/archive/Langfuse-observability-plan.md)
+— that work is **done** (14 metrics ported to `experiments/*.py`,
+`run_experiment.py`, masking, CI workflow, self-hosted runner) and this plan
+builds on it rather than repeating it.
 
-## 0. Decisions locked in for this plan
+**Read [`docs/regression_planning.md`](docs/regression_planning.md) first.**
+It contains the SDK-level findings this plan is built on. Read
+[`docs/regression-testing-plan.md`](docs/regression-testing-plan.md) for what
+"regression" means here, and
+[`docs/performance-latency-plan.md`](docs/performance-latency-plan.md) for
+what latency can honestly be claimed from outside. This plan does not
+re-argue any of it.
 
-Settled in conversation on 2026-07-29. If any of these change, the affected
-phases below need to be re-scoped before continuing — don't silently keep
-building against a stale assumption.
+---
 
-| Decision | Answer | Binds |
+## 0. What "success" means, stated as testable conditions
+
+The requested outcome, decomposed so each phase can be checked against it:
+
+| # | Success condition | Delivered by |
 |---|---|---|
-| Langfuse hosting / PII posture | **Cloud, EU region, synthetic seed data only.** Not a decision to point this integration at real customer-derived data — that requires revisiting §5 of `observability-plan.md` and this plan's Phase 2 note below | Phase 1 |
-| CI cadence | **On-demand only** (manually triggered), no schedule yet | Phase 1.7 |
-| `PlanAdherenceMetric` unblock (`--extra eval`) | **Applied and confirmed 2026-07-29** — `deepeval_trace` now returns a non-null object (`status: SUCCESS`) from `GET /api/agent/trace/{run_id}` | Phase 0 — **done** |
-| Phase 2/3 (application-side tracing, trace linking) | **Full guide included now**, gated behind explicit confirmation before each dependent step, per your instruction | Phase 2, Phase 3 |
+| S1 | Compare **2+ metrics** across **2+ runs** in one view | R1, R3 |
+| S2 | Catch degradation in **scores** | R1, R2, R3 |
+| S3 | Catch degradation in **latency** | R1 (honest latency), R3 |
+| S4 | Comparisons are **honest** — and when they are not comparable, the system **says so loudly and refuses**, rather than showing a misleading delta | **R2** — the load-bearing phase |
+| S5 | **Drill down** from a moved number to the underlying evidence | R5 |
+| S6 | Robust **monitoring** — a regression is noticed without someone watching a chart | R4 |
 
-Every phase below states, per the CLAUDE.md rubric: which bucket it's in,
-which documented endpoint(s) it uses, what it costs per run, what it does to
-a live production instance, and what happens when the data it needs isn't
-there.
+**S4 is the phase to protect if effort has to be cut.** A comparison tool
+that silently compares incomparable runs is worse than no tool: it produces
+numbers that look like results and measure nothing — exactly the failure mode
+`CLAUDE.md` names under "Fail loudly, never infer."
 
----
+### The distinction S4 depends on
 
-## Phase 0 — Unblock `PlanAdherenceMetric` (application-side, backend repo) — DONE
+Two different things make two runs differ, and conflating them is the whole
+risk:
 
-**Confirmed 2026-07-29.** `GET /api/agent/trace/{run_id}` now returns a
-non-null `deepeval_trace` (`status: SUCCESS`) after adding `--extra eval` to
-the post-`COPY` `uv sync` line in the backend Dockerfile and redeploying.
-`PlanAdherenceMetric` is unblocked and included in Phase 1.5's metric
-rollout from the start — no need to add it later.
+| Kind of difference | Comparison is | What to do |
+|---|---|---|
+| **App changed** — `prompt_version`, `model`, `model_configuration` | **Valid.** This is the explanatory variable you are *looking for* | Compare, and display the app delta beside the score delta |
+| **Measurement changed** — `judge_model`, `seed_version`, `schema_version`, reset semantics, harness commit, scenario set | **Invalid / confounded.** The instrument moved, not the thing measured | **Refuse to compare. Shout.** |
 
-**Bucket 2 — the application's job.** Was unrelated to Langfuse; ran in
-parallel with Phase 1 provisioning, not as a hard predecessor to it.
-
-**Root cause** (from `docs/metric-notes.md`): the backend image is built
-with `uv sync --frozen --no-dev`, which excludes the `eval` extra. Without
-it, `deepeval` is not importable, `configure_tracing()` returns `False`
-unconditionally regardless of `EVAL_TRACING`, and `GET
-/api/agent/trace/{run_id}` serves `deepeval_trace: null`.
-
-### Steps to apply in `aml-kyc-agentic-platform`
-
-1. Find wherever the backend image is built — `Dockerfile`, a
-   `docker-compose.yml` build step, or a CI/CD deploy pipeline — and locate
-   the `uv sync --frozen --no-dev` invocation.
-2. Change it to `uv sync --frozen --no-dev --extra eval`.
-3. Confirm `EVAL_TRACING` is not set to a disabling value in whatever
-   environment you rebuild (check `.env`, Helm values, ECS task def, or
-   equivalent — wherever this application's runtime config lives).
-4. Rebuild the image and redeploy to the instance this harness points at.
-
-*(These file/line references come from `observability-plan.md`, itself read
-against the backend on 2026-07-29 — re-verify they still match before
-editing, source may have moved since.)*
-
-### Verification — you must confirm before Phase 1.5
-
-Run against the redeployed instance:
-
-```bash
-curl -s $AML_API_BASE_URL/api/health | jq .eval_tracing        # expect: true
-```
-
-Then trigger one investigation and check its trace:
-
-```bash
-RUN_ID=$(curl -s -X POST $AML_API_BASE_URL/api/cases/<id>/investigate | jq -r .run_id)
-curl -s $AML_API_BASE_URL/api/agent/trace/$RUN_ID | jq .deepeval_trace
-# expect: a non-null object with planned_steps, not null
-```
-
-**Cost:** none beyond the investigate call you'd run anyway.
-**Production impact:** an image rebuild and redeploy — plan it like any
-other deploy, not as a side effect of this test harness.
-**If the data still isn't there:** `PlanAdherenceMetric`'s notebook already
-fails loudly with the exact reason (`metric-notes.md`) rather than
-inferring a plan from the final answer — leave that behavior as is.
-
-**Confirm here before I mark Phase 0 done and include the metric in Phase
-1.5's rollout:** paste the two command outputs above, or tell me you've
-verified them.
+A tool that treats these the same way will attribute a judge-model swap to
+the application and destroy trust in the suite within a month.
 
 ---
 
-## Phase 1 — Test-side Langfuse experiments (this repo, no application change)
+## 1. Decision: Option 1 (Langfuse) is achievable — with one constraint that shapes everything
 
-**Bucket 1 — test-side, in scope here.** Uses only `GET
-/api/eval/scenarios`, `POST /api/cases/{id}/investigate`, `GET
-/api/eval/export/{run_id}`, `GET /api/agent/trace/{run_id}` — all already
-documented and used elsewhere in this repo. No import from, and no
-filesystem dependency on, the application source.
+**Verdict: Option 1 (Langfuse for visualisation and monitoring) is viable
+and is the recommendation.** Option 2 (a custom dashboard) is **not**
+required and should not be built yet — see §8 for the specific triggers that
+would change that.
 
-### Status
+Langfuse provides, natively:
 
-**§1.1–1.5 done and verified 2026-07-29 — Phase 1 is functionally complete.**
+- **Custom Dashboards** — line/bar/time-series/pie widgets over traces,
+  observations and scores, with filtering and group-by; manageable via UI,
+  a public API (`/api/public/unstable`), CLI, and an MCP server.
+- **Metrics API v2** (`GET /api/public/v2/metrics`) — views `observations`,
+  `scores-numeric`, `scores-categorical`; aggregations `sum`, `avg`, `count`,
+  `max`, `min`, `p50/p75/p90/p95/p99`, `histogram`; time granularities from
+  minute to month.
+- **Monitors and Alerts** — threshold monitors over scores and observations,
+  separate **warning** and **alert** thresholds, explicit **no-data
+  handling**, routed to **Slack, webhooks, or GitHub Actions**
+  (`workflow_dispatch`).
 
-- **§1.1 (provisioning):** done. Langfuse Cloud project
-  `aml-kyc-acceptance-tests-synthetic` created under the EU host
-  (`cloud.langfuse.com` — confirmed via search that this *is* the EU
-  region; US is `us.cloud.langfuse.com`), keys in `.env`.
-- **§1.2 (optional dependency):** done. `pyproject.toml` has `langfuse` and
-  `dev` optional-dependency groups; `langfuse==4.14.1` pinned (checked
-  against the live PyPI JSON API, not guessed). Core `uv sync` stays
-  Langfuse-free.
-- **§1.3 (masking):** done. `langfuse_mask.py` + `tests/test_langfuse_mask.py`
-  — fail-closed, fixtures for every named PII field. **14/14 tests pass.**
-  One real bug caught and fixed during §1.5: masking must never be applied
-  to the data `task()`/evaluators return — that's what DeepEval actually
-  scores, and pre-masking it (as an earlier draft of this code did) would
-  silently break any metric that compares real values, like
-  `ToolCorrectnessMetric`'s argument check against a masked
-  `"***MASKED***"` placeholder. Masking now happens exactly once, at the
-  Langfuse SDK's export boundary (`Langfuse(mask=mask)`), confirmed by
-  direct SDK testing to receive whole nested objects, not flattened
-  scalars — see `langfuse_mask.py`'s docstring and
-  `experiments/investigate.py`'s module docstring for the `tool`/`server`
-  naming convention this also required (the masker's "name" substring
-  match would otherwise redact a tool's own identifier, not just a
-  person's name).
-- **§1.4 (proof) + §1.5 (all 14 metrics):** done, and now **all 14 have run
-  at least once against the live local instance and real Langfuse Cloud**
-  (6 by me, 2 by you, 6 by you as a follow-up). `run_experiment.py` is the
-  CLI entrypoint (`uv run python run_experiment.py [substring-filter]`,
-  `--list`); metric logic lives in
-  `experiments/{rag_query,retrieval,investigate,conversational}.py`, one
-  from-scratch port per notebook.
+That covers S1, S2, S3, S5 and S6 without building any UI.
 
-  | Metric | Score | Note |
-  |---|---|---|
-  | `answer_relevancy` | 1.000 | |
-  | `hallucination` | 0.800 | |
-  | `contextual_precision` | 1.000 | no-LLM ranking metric |
-  | `contextual_recall` | (run by you) | |
-  | `tool_correctness` | 1.000 / 1.000 | names + arguments; validates expected-tool derivation and live-schema check |
-  | `argument_correctness` | 1.000 | |
-  | `bias` | (run by you) | |
-  | `prompt_alignment` | **raised, no score** — see finding below | |
-  | `plan_adherence` | 1.000 | verbose log shows the full 8-step plan matched exactly |
-  | `tool_use` | 0.667 | matches the source notebook's own documented authoring-run score |
-  | `multi_turn_mcp_use` | 0.793 (args 0.990 / primitive 0.753) | matches the notebook's own authoring-run pattern |
-  | `turn_relevancy` | 1.000 | the one genuinely-application-owned multi-turn conversation |
-  | `pii_leakage` | 0.000 | **expected** — the adversarial probe; a failing score here is the correct finding (metric-notes.md), not a defect |
-  | `summarization` | 0.600 | passes |
+### The constraint: score `metadata` is **not** a dashboard dimension
 
-  **A real finding, not a bug in the port (2026-07-29):** `prompt_alignment`
-  raised its deterministic evidence-labelling guard — the agent's rationale
-  for scenario s2 cited tool-call evidence labels (`T1, T2, T3`) that did
-  not resolve in the investigation's own `evidence` array. Confirmed this
-  isn't a false positive in the check itself: an immediate follow-up
-  `POST /investigate` on the same case resolved all six labels
-  (`C5, C6, T1-T4`) cleanly, so the checking logic is correct and the
-  failure was a genuine instance of the live agent hallucinating an
-  evidence citation — likely intermittent, since it depends on LLM
-  generation rather than a deterministic code path. **Do not treat a clean
-  re-run as this being fixed** — track it, don't dismiss it; this is
-  exactly the class of defect `PromptAlignmentMetric`'s deterministic check
-  (independent of the judge) exists to catch, and `docs/metric-notes.md`
-  currently lists this metric as "Implemented and verified" without this
-  caveat, worth a note there once confirmed reproducible.
-- **§1.7 (CI):** done. `.github/workflows/langfuse-experiment.yml` —
-  `workflow_dispatch` only, no schedule, `runs-on: [self-hosted, macOS,
-  ARM64]` (decided 2026-07-29: self-hosted, not a staging deployment).
-  Repo pushed to GitHub and runner registered + confirmed listening
-  2026-07-29. **Last step before a real dispatch works**: repo secrets/
-  variables (`LANGFUSE_*`, `OPENAI_API_KEY`, `AML_API_BASE_URL`, etc.) —
-  see §1.7 for the exact list.
+This is the finding that dictates the design, and it is easy to get wrong.
 
-**A correction to this plan's own original text, found by inspecting the
-installed SDK rather than trusting hosted docs a second time:** the
-`get_client(mask=...)` pattern originally sketched here doesn't exist —
-`inspect.signature(get_client)` shows it only accepts `public_key`. Mask is
-passed via `Langfuse(mask=mask)` directly. Everything else —
-`run_experiment` signature, `Evaluation` fields, `LocalExperimentItem`'s
-required keys, the `mask` callback contract, and both
-`LANGFUSE_BASE_URL`/`LANGFUSE_HOST` env vars — was checked the same way
-(`inspect.signature`, reading `langfuse/_client/client.py` and
-`langfuse/types.py` directly in the installed package) and matches what's
-in the code.
+`docs/regression_planning.md` §2 recommends stamping run identity into
+`Evaluation(metadata=…)`. That is correct **for the raw score API**
+(`scores_v3.get_many_v3()` returns `metadata`, so a script can group by it)
+— but the **Metrics API and Custom Dashboards cannot group by metadata at
+all.** Verified by reading the installed SDK's own `metrics()` docstring; the
+`scores-numeric` view's complete dimension list is:
 
-**Next step, your call:** Phase 1 (§1.1–1.7) is functionally complete. Open
-items: (1) the `prompt_alignment` finding above — decide whether to raise
-it with whoever owns the application, track it as a known intermittent
-issue, or investigate further; (2) Phase 1.7's CI workflow needs a GitHub
-remote and a network-reachable `AML_API_BASE_URL` before it can actually
-run (see §1.7 below); (3) whether to move on to Phase 2 (app-side tracing)
-at all — the trigger for that is a concrete question Phase 1 can't answer,
-which hasn't come up yet.
-
-### 1.1 Provision Langfuse (Cloud, EU region, synthetic data only)
-
-1. Create an account/project at the **EU-region** Langfuse Cloud endpoint.
-   **Confirmed 2026-07-29**: `https://cloud.langfuse.com` *is* the EU host;
-   US is the distinct `https://us.cloud.langfuse.com` (also JP/HIPAA hosts
-   exist). Don't assume this stays true indefinitely — Langfuse could add
-   or rename regions.
-2. Name the project something unambiguous, e.g.
-   `aml-kyc-acceptance-tests-synthetic`. The name itself should signal "not
-   real data" to anyone who finds it later.
-3. Generate a public/secret API key pair scoped to that project only.
-4. Add to `.env.example` (blank placeholders, committed) and `.env`
-   (real values, already gitignored):
-
-   ```
-   LANGFUSE_PUBLIC_KEY=
-   LANGFUSE_SECRET_KEY=
-   LANGFUSE_HOST=https://cloud.langfuse.com   # or the EU-specific host — confirm current value
-   ```
-
-5. **Runtime guard, not just a policy note:** `run_experiment.py` (§1.3)
-   must refuse to run if `AML_API_BASE_URL` doesn't resolve to an instance
-   whose `GET /api/eval/scenarios` returns the known synthetic
-   `seed_version` (`AML_EXPECTED_SEED_VERSION`, already checked elsewhere in
-   this repo). This is the same fail-loudly pattern the notebooks already
-   use for seed-version drift — reuse it here so a misconfigured
-   `AML_API_BASE_URL` can't silently send whatever that instance holds to
-   Langfuse Cloud.
-
-### 1.2 Add Langfuse as an optional extra, not a core dependency
-
-Per `observability-plan.md` §3.1, the 14 notebooks must stay Langfuse-free
-and installable offline. In `pyproject.toml`, add a new optional-dependency
-group (matching the existing `eval`-extra pattern in this repo):
-
-```toml
-[project.optional-dependencies]
-langfuse = ["langfuse>=<pin-to-current-major>"]
+```
+environment, name, source, dataType, configId, timestampMonth, timestampDay,
+value, traceName, tags, traceRelease, traceVersion, observationName,
+observationModelName, observationPromptName, observationPromptVersion
 ```
 
-`uv sync` (no flags) continues to install zero Langfuse dependencies.
-`uv sync --extra langfuse` is required only to run `run_experiment.py`.
-Pin the version exactly, the same way `deepeval==4.1.4` is pinned — the SDK
-moved to an OpenTelemetry-based API recently and older tutorials online
-don't match the current interface.
+No `metadata`. **So metadata alone gets you a working script and a useless
+dashboard.**
 
-### 1.3 Write the masking function first, as tested code
+Two further constraints found the same way:
 
-Before any run that sends data, per `observability-plan.md` §5 recommendation
-3:
+- **`environment` cannot carry run identity.** `client.py:2980` hardcodes
+  every experiment span's environment to the constant `"sdk-experiment"`,
+  overriding `Langfuse(environment=…)` and `LANGFUSE_TRACING_ENVIRONMENT`.
+  Any design that labels runs by environment silently does nothing.
+- **`observationPromptVersion` / `observationPromptName` come from Langfuse
+  prompt *linking*,** not from arbitrary strings. Using them would mean
+  adopting Langfuse prompt management for application prompts, which
+  `observability-plan.md` §3.2 rules out on governance grounds. **Do not use
+  these dimensions.**
 
-- One function, fixtures for every PII-bearing field the seed scenarios can
-  produce (customer `name`, `incorporation_or_dob`, `identifiers.dob`,
-  beneficiary names, `matches[].listed_name` — cross-check this list against
-  current `GET /api/cases/{id}` and `GET /api/customers` response schemas,
-  it may have grown).
-- Wrapped in `try/except` that **fails closed** — the doc is explicit that
-  an exception inside a Langfuse mask function drops the entire export
-  batch silently, so a bug in masking must not become a bug in whether data
-  gets exported at all. Fail closed means: on exception, redact the whole
-  field to a fixed sentinel rather than re-raising into the SDK.
-- This is real infrastructure even though Phase 1 only ever sends synthetic
-  data — it's the control that must already exist and be trusted the day
-  anyone considers pointing a Langfuse-integrated runner at anything else.
-  Don't treat it as optional because the current data is synthetic.
+### The resolution: `release` is the grouping key
 
-Test it as ordinary unit-tested code, not as an integration test against
-live Langfuse.
+`release` is applied as an **OpenTelemetry Resource attribute** on the
+TracerProvider (`resource_manager.py:632-637`) and is **not** overridden the
+way `environment` is. It surfaces as the **`traceRelease` dimension**, which
+*is* groupable on the `scores-numeric` view.
 
-### 1.4 Build `run_experiment.py` — prove the loop on one metric, one scenario
+So: **`release` = the run label.** Set once per process via
+`Langfuse(release=…)` or `LANGFUSE_RELEASE`. Everything a dashboard needs to
+group by must go there; everything else is metadata for scripts and
+drill-down.
 
-New file at repo root, alongside `run_all.py`, importing nothing from the
-notebooks (per `observability-plan.md` §3.1). Base it on the sketch in
-`observability-plan.md` §4 (Phase 1), adapted to:
-
-- Apply the masking function from §1.3 to every span/generation before
-  export.
-- Include `run_id` in dataset-item metadata (this is Phase 3 Option A from
-  `observability-plan.md` §4.3 — no application change needed, `run_id` is
-  already returned by `POST /api/cases/{id}/investigate` and is the join key
-  back to `GET /api/eval/export/{run_id}` and `GET
-  /api/agent/trace/{run_id}`). Do this now, not as a separate later phase —
-  it costs nothing extra once `run_id` is already in hand.
-- Start with exactly one metric (`AnswerRelevancyMetric`, the simplest,
-  already implemented and verified per `metric-notes.md`) and one scenario.
-- `max_concurrency=1` for this first proof run — the doc's warning about the
-  planner skipping already-completed tools for a case applies at any
-  concurrency above 1, and there's no reason to risk noisy scores on the
-  very first proof.
-
-**Verification gate — confirm before I extend to more metrics:**
-Run it, then confirm in the Langfuse UI: a dataset run appears, one score is
-attached with the judge's reason string, and a second execution of the same
-script produces a second, comparable run. Tell me you've seen this (a
-screenshot or the run URL is enough) before Phase 1.5.
-
-### 1.5 Extend to all metrics that pass today
-
-Once 1.4 is confirmed: add an evaluator function per remaining metric —
-all 14 now that Phase 0 is confirmed, including `PlanAdherenceMetric`, whose
-golden-derivation logic (declared plan vs. executed trace) now has real data
-to compare via `GET /api/agent/trace/{run_id}`. Reuse the golden-derivation
-logic each notebook
-already implements — this is the accepted duplication cost named in
-`observability-plan.md` §3.1, not something to abstract into a shared
-package the notebooks would then depend on.
-
-Keep `max_concurrency` low (2 per the doc's sketch) and prefer running
-against a freshly reset instance (`AML_RESET_BEFORE_RUN` semantics) so scores
-aren't noisy from the planner skipping already-completed tools.
-
-### 1.6 Cost
-
-Every run costs twice: the application's own LLM calls (retrieval + MCP
-tool calls + synthesis per scenario) plus the judge call per metric per
-scenario (some metrics, `ContextualPrecision`/`Recall`, judge per retrieved
-chunk). With 8 scenarios × 14 metrics, budget for on the order of a hundred
-judge calls per full run at `gpt-5.4-mini` — cheap individually, non-trivial
-in aggregate. This is the reason cadence (§1.7) matters.
-
-### 1.7 CI — on-demand only, per your decision — DONE
-
-**Built 2026-07-29**: `.github/workflows/langfuse-experiment.yml` — new CI
-surface (no `.github/workflows` existed before this). `workflow_dispatch`
-only, no `schedule:` trigger, two inputs:
-
-- `filter` — optional substring on experiment function names, blank runs
-  all 14.
-- `reset_before_run` — boolean, **defaults to `true`**, maps to
-  `AML_RESET_BEFORE_RUN`. Needed for correct first-run planner behaviour on
-  the tool-planning metrics; **drops and recreates every table** on
-  whatever instance `AML_API_BASE_URL` points to. Exposed as an explicit,
-  visible dispatch input rather than hardcoded either way, precisely
-  because of that destructiveness — set it `false` if the target instance
-  holds anything you don't want wiped.
-
-Steps: checkout (`actions/checkout@v7`) → `astral-sh/setup-uv@v9.0.0` →
-`uv sync --extra langfuse` → run `run_experiment.py` with the filter, tee'd
-to a file → write that file into `$GITHUB_STEP_SUMMARY`.
-
-**Fixed 2026-07-29, two issues found on first real dispatch:**
-- `astral-sh/setup-uv@v9` doesn't resolve — that action only publishes exact
-  version tags (`v9.0.0`), not a floating major-version alias like most
-  other actions. Pinned to `v9.0.0`.
-- `enable-cache: true` was stalling for minutes in the post-job cleanup
-  step, uploading `~/.cache/uv` (uv's *global* package cache, ~2.5GB) to
-  GitHub's remote cache over a home network. That remote cache exists to
-  save GitHub-hosted (ephemeral) runners from re-downloading packages every
-  run; it buys nothing on a persistent self-hosted runner, whose disk cache
-  already survives between runs. Set to `enable-cache: false`.
-
-**Decision (2026-07-29): self-hosted runner, not a staging deployment.**
-Deploying the AML app somewhere network-reachable is out of scope here (a
-different repository's job, per CLAUDE.md's bucket-2 rule) — a self-hosted
-GitHub Actions runner on your own machine sidesteps that entirely, since it
-runs the job locally and can reach `http://localhost:8000` directly. The
-workflow's `runs-on` is now `[self-hosted, macOS, ARM64]` (matching what
-GitHub auto-assigns a macOS/Apple-Silicon self-hosted runner), not
-`ubuntu-latest`.
-
-**You handle GitHub-remote creation and pushing yourself** (per your
-choice) — confirm here once the repo exists so I know CI has somewhere to
-live. Steps to register the runner, once the repo is up:
-
-1. On GitHub: repo → **Settings → Actions → Runners → New self-hosted
-   runner**. Select **macOS** and **ARM64**.
-2. GitHub generates the exact download/config commands **and a
-   registration token that expires in about an hour** — run the commands
-   it shows you at that moment; don't reuse commands from a screenshot or
-   an old session, the token won't still be valid.
-3. `./config.sh` will prompt for the runner name and labels — accept the
-   defaults (`self-hosted`, `macOS`, `ARM64` get applied automatically) so
-   they match this workflow's `runs-on`.
-4. Run it as a persistent background service rather than in a foreground
-   terminal you might close: `./svc.sh install && ./svc.sh start` (GitHub's
-   runner package includes this script). Check status with `./svc.sh
-   status`.
-5. **Security note, from GitHub's own guidance**, already in the workflow
-   file's header comment: self-hosted runners are safe on a private repo
-   triggered only by `workflow_dispatch` — there's no `pull_request`
-   trigger here, so a fork PR can't run arbitrary code on your machine.
-   Don't add one without re-reading GitHub's self-hosted-runner security
-   docs first, and don't make this repo public with the runner attached
-   without that same re-read.
-
-**Confirmed 2026-07-29** — runner registered (`v2.336.0`) and listening
-(`√ Connected to GitHub`, `Listening for Jobs`). It only picks up jobs while
-connected — see the `svc.sh` background-service note below for how that
-connection is now kept alive.
-
-**Resolved 2026-07-30 — switched to the `svc.sh`-installed background
-service.** The runner previously ran as foreground `./run.sh`, which had
-real drawbacks: closing the terminal, sleeping the laptop, or a crash
-silently stopped the runner, and a `workflow_dispatch` fired while it was
-down just sat at "Waiting for a runner to pick up this job..." with no
-error — exactly the failure mode seen earlier in this session. Fixed by:
-
-```bash
-cd /Users/bola/seyi/AI-LLM/actions-runner-local
-./svc.sh install
-./svc.sh start
-./svc.sh status        # confirm it's running
-```
-
-Installed as a per-user `launchd` LaunchAgent
-(`~/Library/LaunchAgents/actions.runner.adexstack-aml-kyc-acceptance-tests.Bolas-Air.plist`,
-logs at `~/Library/Logs/actions.runner.adexstack-aml-kyc-acceptance-tests.Bolas-Air/`).
-Confirmed listening (`√ Connected to GitHub`, `Listening for Jobs`) — no
-foreground terminal required, survives terminal close, restarts at login.
-No `run.sh` process should be started manually anymore; use `./svc.sh
-{start,stop,status,uninstall}` in `actions-runner-local` to manage it going
-forward.
-
-This installs the runner as a `launchd` service that starts at login and
-survives closing the terminal, without changing anything about the
-workflow file, the registration, or the security posture (still
-`workflow_dispatch`-only on a private repo). Stop the old foreground
-`./run.sh` process first (`Ctrl-C`) so two runner processes don't both try
-to register the same name. Re-confirm with `√ Connected to GitHub` /
-`Listening for Jobs` in `./svc.sh status` output, the same signal used to
-confirm registration originally.
-
-**Runner install location (updated 2026-07-29):** the runner's own files
-(`config.sh`, `run.sh`, `.credentials`, `_work/`, etc.) live at
-`/Users/bola/seyi/AI-LLM/actions-runner-local` — a sibling of this repo, not
-inside it. That's a deliberate move: this repo's `git` root has no
-visibility outside its own directory, so the runner's credentials and
-per-job workspace (which includes a full checkout of this repo under
-`_work/`) can never be accidentally staged or committed, no matter what
-`.gitignore` says. The repo's own `.gitignore` still carries an
-`/actions-runner/` entry from when the runner was expected to live inside
-the repo tree — harmless to keep as a safety net, but it's not what's doing
-the work now.
-
-**Still needed before a real dispatch will succeed** (repo → Settings →
-Secrets and variables → Actions): secrets `LANGFUSE_PUBLIC_KEY`,
-`LANGFUSE_SECRET_KEY`, `OPENAI_API_KEY`, relevant `AML_API_KEY*`; variables
-`AML_API_BASE_URL=http://localhost:8000` (reachable now that the runner is
-local), `LANGFUSE_BASE_URL`, `AML_EXPECTED_SEED_VERSION`,
-`DEEPEVAL_JUDGE_MODEL`. Same list as earlier in this section — repeated
-here since the runner being live makes this the actual next blocker.
-
-**One thing this workflow still cannot solve for you:**
-
-1. **No per-run deep link.** `ExperimentResult.dataset_run_url` (confirmed
-   by reading `langfuse/experiment.py` in the installed package) is only
-   populated when scoring against a real Langfuse-hosted Dataset. Every
-   experiment in this repo uses local (in-code) dataset items instead — see
-   `experiments/*.py` — so this field is always `None` here, and the
-   summary step says so rather than fabricate a link. A human has to
-   browse to the project and filter `Environment = sdk-experiment`,
-   matching the run name printed in the log
-   (`aml-acceptance-<metric> - <timestamp>`). Moving to real Langfuse
-   Datasets would fix this but is a bigger design change, not something to
-   slip in as a CI side effect.
-
-**Secrets/variables you still need to set in the GitHub repo before first
-use** (I cannot set these for you): secrets `LANGFUSE_PUBLIC_KEY`,
-`LANGFUSE_SECRET_KEY`, `OPENAI_API_KEY`, and whichever `AML_API_KEY*` the
-target instance's `AUTH_MODE` requires; variables `AML_API_BASE_URL`,
-`LANGFUSE_BASE_URL` (defaults to the confirmed EU host if unset),
-`AML_EXPECTED_SEED_VERSION`, `DEEPEVAL_JUDGE_MODEL`.
-
-Revisit scheduling once you've seen a handful of on-demand runs and have a
-real cost figure, per `observability-plan.md` §6 step 5 — don't schedule
-against a guess. This repo also has no GitHub remote configured yet
-(`git remote -v` is empty), so none of this can actually execute in GitHub
-Actions until it's pushed to a GitHub repo.
-
-**Production impact of Phase 1 as a whole:** every run performs real writes
-against the target instance (`investigate` calls), same as `run_all.py`
-already does today — no new category of production impact, just a second
-caller of the same endpoints. Treat concurrent/cadence caution the same way
-you already do for `run_all.py`.
+> **Verification gate before building R3.** The `release` mechanism is
+> **source-verified, not yet runtime-verified.** `_init_tracer_provider`
+> only configures a provider when the global one is still a
+> `ProxyTracerProvider`, so a pre-existing provider could drop the attribute.
+> Do one throwaway run and confirm in the Langfuse UI that `traceRelease` is
+> populated and groupable **before** building any dashboard on it. If it is
+> not, fall back to encoding the label in the **trace name** (`traceName` is
+> also a groupable dimension) and record that here.
 
 ---
 
-## Phase 2 — Application-side tracing (application change, trigger-gated)
+## 2. Phase R0 — Make every run identifiable *and* self-describing
 
-**Bucket 2 — valuable, but the application's job.** Do not start this
-until a concrete question comes up that Phase 1 cannot answer — e.g. "this
-metric regressed and I can't tell which tool call caused it." Don't build
-it speculatively.
+**Bucket 1** (test-side). No application change. Cost: zero extra judge
+calls.
 
-**Before this phase can point at anything but a synthetic/staging
-environment, the hosting decision in §0 must be revisited.** Phase 1's
-"Cloud EU, synthetic only" answer does not extend to Phase 2 by default —
-application-side tracing captures real request/response content, and if
-this backend ever runs against real customer data, tracing that data to
-Langfuse Cloud is a different risk decision than the one made for Phase 1.
-Don't assume the Phase 1 answer carries forward; ask again when this phase
-becomes live.
+### R0.1 One run label, three places
 
-### Steps to apply in `aml-kyc-agentic-platform`
+Introduce `AML_RUN_LABEL` (default: UTC timestamp; in CI, default to the
+dispatching commit SHA). It must land in **all three** of:
 
-The backend already has the seam Langfuse needs, per `observability-plan.md`
-§4 Phase 2: its own `observe` wrapper at `backend/app/observability.py:70`,
-deliberately indirecting DeepEval's decorator rather than applying it
-directly, used at:
+1. `Langfuse(release=run_label)` — the **groupable** dimension (dashboards).
+2. `run_experiment(run_name=f"{spec_name} - {run_label}")` — human-navigable
+   run names, replacing the SDK default `"{name} - {iso_timestamp}"`.
+3. `Evaluation(metadata={...})` — the **queryable** detail (scripts,
+   drill-down).
 
-| Decorator | File (re-verify against current source — this reference is from `observability-plan.md`, read 2026-07-29) |
+### R0.2 `run_context()` in `experiments/common.py`
+
+One function returning a flat `dict[str,str]`, split explicitly into the two
+categories S4 depends on:
+
+**Measurement axes** (any change ⇒ runs are NOT comparable):
+`judge_model`, `seed_version`, `schema_version`, `reset_before_run`,
+`harness_sha`, `scenario_count`.
+
+**Application axes** (change ⇒ comparable, and this is the signal):
+`app_model`, `app_prompt_version`, `app_temperature`, `app_build` (see R0.4).
+
+Sourced from `GET /api/agent/trace/{run_id}` (`model`, `prompt_version`,
+`model_configuration`) — verified live 2026-07-31, no application change
+needed. Values must be flat strings; metadata is flattened on export.
+
+**Fail loudly:** if a fingerprint field is absent, record the literal
+`"unavailable"`. Never omit the key and never guess — a comparison that
+silently lost its fingerprint is the exact failure S4 exists to prevent.
+
+### R0.3 A local run manifest
+
+Append one row per run to `results/runs.jsonl` (already gitignored):
+`run_label`, `experiment_id` (from `ExperimentResult.experiment_id` — the only
+precise per-run join key, random per call for local items, and recoverable
+nowhere else), `run_name`, both fingerprint blocks, UTC start/end.
+
+This is `regression-testing-plan.md` Phase 0, which that doc says to do
+**regardless of Langfuse**, and it is what makes R2 work offline and makes
+the whole thing debuggable when the dashboard disagrees with your memory.
+
+### R0.4 Application ask (Bucket 2) — one field
+
+The application exposes **no build identifier**. `/api/health` returns only
+`{status, schema_version, eval_tracing}`. `prompt_version` and `model` are
+good proxies but do not move when retrieval logic, a tool implementation, or
+a threshold changes — so a real regression can appear with *every* fingerprint
+field identical, which R2 would then report as "no app change," the precise
+misattribution `regression-testing-plan.md` §2 warns about.
+
+**Ask for:** a `build_version` (or `git_sha`) field on `GET /api/health`.
+Read-only, one field, no new endpoint. **Stop there** — per `CLAUDE.md`'s
+bucket-2 rule, do not design the application-side change from this
+repository. Until it exists, `run_context()` records `app_build:
+"unavailable"` and **R2 treats that as a warning**, because it means app
+changes may be invisible.
+
+The ask is written up, ready to hand over, in
+[`docs/asks/build-version-request.md`](docs/asks/build-version-request.md) —
+contract, constraints and acceptance criteria, with implementation choices
+left to the application team.
+
+**Exit criteria:** two runs with different `AML_RUN_LABEL` produce scores
+distinguishable by `traceRelease` in the Langfuse UI, and `results/runs.jsonl`
+has two rows.
+
+---
+
+## 3. Phase R1 — Emit the comparables, including honest latency
+
+**Bucket 1.** No application change. Cost: unchanged for quality scores;
+**zero additional** for latency (read from data already returned).
+
+### R1.1 Quality scores — stamp the existing 17
+
+17 `Evaluation(...)` call sites across
+`experiments/{investigate,rag_query,retrieval,conversational}.py` gain
+`metadata=run_context()`. Mechanical.
+
+Score names are already stable and distinct (`answer_relevancy`,
+`tool_correctness_names`, `tool_correctness_arguments`,
+`argument_correctness`, `bias`, `prompt_alignment`, `plan_adherence`,
+`hallucination`, `summarization`, `pii_leakage`, `contextual_precision`,
+`contextual_recall`, `tool_use`, `multi_turn_mcp_use`, `turn_relevancy`,
+`mcp_primitive_accuracy`, `mcp_argument_accuracy`).
+
+**Treat these names as an API** — Langfuse's own best-practices guidance is
+explicit that renaming a score silently breaks every dashboard widget, saved
+filter and monitor that targets it. Once R3 exists, a rename is a breaking
+change, not a tidy-up. Record any rename in `docs/metric-notes.md`.
+
+### R1.2 Latency — as explicit scores, never as Langfuse span duration
+
+**This is the single most important correctness decision in R1.**
+
+Langfuse's `observations` view has a `latency` measure. For our experiment
+spans that measures **harness wall-clock — the application call plus the
+judge call plus overhead.** Charting it as "application latency" would be
+precisely the conflation `performance-latency-plan.md` §5 forbids ("Don't
+conflate notebook wall-clock time with application latency").
+
+Instead, emit the application's **own** server-side timings as numeric
+scores, so they live in the same store, the same dashboards and the same
+monitors as quality scores:
+
+| Score name | Source (`GET /api/agent/trace/{run_id}`) |
 |---|---|
-| `@observe(type="agent", name="investigation")` | `backend/app/services/agent/investigation.py:136` |
-| `@observe(type="llm", name="synthesis")` | `backend/app/services/agent/investigation.py:283` |
-| `@observe(type="tool")` | `backend/app/services/agent/investigation.py:486` |
-| `@observe(type="agent", name="rag_query")` | `backend/app/services/rag/qa.py:104` |
-| `@observe(type="llm", name="generation")` | `backend/app/services/rag/qa.py:91` |
-| `@observe(type="retriever")` | `backend/app/services/rag/retrieval.py:39` |
+| `app_latency_ms` | `latency_ms` (whole run) |
+| `app_latency_retrieval_ms` | `steps[]` where `type == "retrieval"` |
+| `app_latency_tool_call_ms` | `steps[]` where `type == "tool_call"` |
+| `app_latency_synthesis_ms` | `steps[]` where `type == "synthesis"` |
 
-1. Add the Langfuse Python SDK as a real backend dependency (this is
-   production dependency surface, not test-only — treat it with the same
-   care as any other new prod dependency: pin the version, review its
-   transitive deps).
-2. Extend the existing `observe` wrapper in
-   `backend/app/observability.py` (do **not** import Langfuse's own
-   `@observe` directly into `investigation.py`, `qa.py`, or `retrieval.py`)
-   so one wrapper can emit to DeepEval, Langfuse, both, or neither, keyed
-   off configuration. This preserves the existing `EVAL_TRACING` switch and
-   keeps the choice in one file.
-3. Add a new env var, e.g. `LANGFUSE_TRACING_ENABLED`, independent of
-   `EVAL_TRACING` — the two serve different consumers (DeepEval's own
-   plan-adherence trace vs. an operational observability trace) and
-   shouldn't be conflated into one flag.
-4. Apply the masking approach from Phase 1.3 here too, or a superset of it —
-   this path now carries real request/response content, not just
-   scenario metadata.
-5. Deploy to a **non-production** environment first.
+This is `performance-latency-plan.md` Phase 0 — data the suite already pays
+for and currently throws away — and it makes S3 a first-class comparable
+rather than an inference. Percentiles (`p50`/`p95`) come free from the
+Metrics API aggregations, satisfying that doc's Phase 1 without extra code.
 
-### Verification — confirm before Phase 3 (if you pursue it)
+**Do not** add synthetic load or timing probes here. Load/stress testing
+against this live production instance remains out of scope and requires
+separate explicit authorization (`CLAUDE.md`, `performance-latency-plan.md`
+§4).
 
-- `GET /api/health` (or wherever this backend surfaces flags) reports the
-  new tracing flag active.
-- Trigger a real `investigate` call in the non-prod environment and confirm
-  spans appear in the Langfuse UI with the expected span tree (agent →
-  llm/tool children), and that masked fields are actually redacted, not just
-  present-but-not-yet-checked.
-
-**Cost:** ongoing per-request overhead (span creation, network export) on
-the agent hot path, plus whatever Langfuse ingestion costs at this project's
-volume. **Production impact:** a real backend code change touching the
-agent hot path — needs its own tests and a normal deploy process, not a side
-effect of a test-harness change. **If the SDK or export fails:** per
-`observability-plan.md` §5, a masking-function exception drops the whole
-export batch — make sure that failure mode degrades to "no trace for this
-request" and never to "request fails," i.e. tracing must not be able to take
-down the agent path it's observing.
-
-**Confirm here before Phase 3:** tell me this is deployed and you've seen
-traced spans in Langfuse for a real (non-prod) investigation.
+**Exit criteria:** one run produces both quality and `app_latency_*` scores,
+all carrying `traceRelease` and full metadata.
 
 ---
 
-## Phase 3 — Trace linking beyond `run_id` correlation (optional, likely unnecessary)
+## 4. Phase R2 — The comparability guard (`compare_runs.py`)
 
-**Bucket 2 if pursued — application change.** Phase 1.4 already gives you
-Option A (correlate by `run_id`, no application change) for free. This phase
-is Option B from `observability-plan.md` §4.3: propagating W3C trace context
-so a Langfuse trace and the application's internal trace are the *same*
-trace rather than two records joined by a shared id.
+**Bucket 1. This is S4, and it is the phase that must not be cut.**
+Read-only; **zero judge calls**; safe to run as often as you like — which is
+exactly why it is a separate script from the thing that costs money.
 
-**Do not start this speculatively.** Per the source doc: revisit only if
-you find yourself repeatedly unable to answer a real question without a
-unified flame graph — `run_id` correlation answers "which application run
-produced this score," which is most of the practical need.
+New `compare_runs.py` at repo root, importing nothing from the notebooks.
 
-If it does become necessary: the backend would need to accept an inbound
-`traceparent` header and continue that trace rather than starting its own.
-Note the tradeoff named in the source doc before doing this: it means a test
-client can influence server-side trace identity, which is worth thinking
-about explicitly for any internet-facing deployment before implementing it.
+### R2.1 Refuse before you compare
+
+Given two run labels, first compare their **measurement axes**. If any of
+`judge_model`, `seed_version`, `schema_version`, `reset_before_run`,
+`harness_sha`, or `scenario_count` differs:
+
+```
+REFUSING TO COMPARE baseline-07-30 vs after-planner-change
+
+  judge_model      gpt-5.4-mini   ->  gpt-5.4        CHANGED
+  seed_version     scenarios-v1   ->  scenarios-v1   ok
+  reset_before_run true           ->  false          CHANGED
+
+These runs are not comparable: the measurement changed, not just the
+application. Any score delta below would mix a judge swap and a planner
+state difference with whatever the application actually did.
+
+Re-run with the same judge model and AML_RESET_BEFORE_RUN=true, or pass
+--force to print the deltas anyway (they will be labelled UNSAFE).
+```
+
+Non-zero exit. `--force` is available but every row it prints is labelled
+`UNSAFE`, and it never writes a "clean" summary. **The default must be
+refusal**, not a warning that scrolls past.
+
+`reset_before_run` deserves emphasis: the planner skips tools already
+completed for a case, so a reset run and an un-reset run produce different
+tool plans for reasons unrelated to quality. Comparing them is meaningless
+for the five tool-planning metrics.
+
+### R2.2 Then compare, with attribution beside every delta
+
+When measurement axes match, pull scores via
+`scores_v3.get_many_v3(name=…, from_timestamp=…)` — or by `experiment_id`
+from the manifest for precision — group by `run_label`, and print per metric:
+baseline, current, delta, and **what changed application-side**:
+
+```
+metric                     baseline  current   delta    app change
+answer_relevancy             0.92      0.91    -0.01    prompt_version v1->v2
+tool_correctness_names       0.88      0.62    -0.26 !! prompt_version v1->v2
+app_latency_ms (p95)         7594      9120    +1526 !! prompt_version v1->v2
+```
+
+`!!` marks "worth a look," **not** "failed" — see R6. Support N runs, not
+just two, so trends are visible.
+
+### R2.3 Also write Phase-0 history
+
+Append every score to `results/scores.jsonl`. Gives a `grep`-able artifact
+with no dashboard login, and lets R2 work when Langfuse is unreachable.
+
+**Exit criteria:** comparing two deliberately-mismatched runs refuses with a
+specific message and non-zero exit; comparing two matched runs prints a
+delta table with app attribution.
 
 ---
 
-## What this plan deliberately does not do
+## 5. Phase R3 — Langfuse dashboards (Option 1, the visualisation)
 
-- **Does not touch the 14 notebooks.** They stay Langfuse-free and portable,
-  per `observability-plan.md` §3.1 — `run_experiment.py` is a sibling to
-  `run_all.py`, not a replacement or a shared import.
-- **Does not adopt Langfuse prompt management** for application prompts —
-  `observability-plan.md` §3.2's governance argument stands; out of scope
-  here entirely.
-- **Does not treat Langfuse as a shortcut for `PlanAdherenceMetric`.**
-  Phase 0 is the actual fix; Langfuse traces are a different shape and
-  wouldn't satisfy that metric even if adopted first.
-- **Does not schedule anything in CI yet**, per your cadence decision —
-  Phase 1.7 ships on-demand only; revisit with real cost data in hand.
+**Bucket 1.** Requires R0's `release` verification gate to have passed.
 
-## Open items to revisit, not blocking Phase 1
+Build **one dashboard**, not many. Widgets, all on the `scores-numeric` view
+unless noted:
 
-- Exact current EU-region Langfuse Cloud hostname/URL — confirm against
-  Langfuse's own docs at provisioning time, don't hardcode a URL from this
-  plan without checking it's still current.
-- Exact Langfuse Python SDK version to pin in `pyproject.toml` — check
-  what's current when Phase 1.2 is implemented, the interface has moved
-  materially per `observability-plan.md`'s opening caveat.
-- The full current list of PII-bearing fields for the masking function
-  (§1.3) — cross-check against live `/openapi.json` schemas at
-  implementation time, the list above is a starting point, not guaranteed
-  exhaustive.
+| Widget | Purpose | Config |
+|---|---|---|
+| **Quality by run** | S1 + S2 | Bar; dimension `traceRelease`; breakdown `name`; measure `avg(value)`; filter `name` in the 17 quality scores |
+| **Quality trend** | Drift over many runs | Line; time dimension; breakdown `name` |
+| **Latency by run** | S3 | Bar; dimension `traceRelease`; measure `p95(value)`; filter `name` in `app_latency_*` |
+| **Latency phase split** | Which phase slowed | Bar; breakdown `name` across the three phase scores |
+| **Run inventory** | Sanity | Table; dimension `traceRelease`; measure `count` — a run with fewer scores than its predecessor is an incomplete run, not an improvement |
+
+That last widget is a cheap, high-value trap: a partially-failed run
+otherwise looks like a quality change.
+
+**Manage dashboards as code where practical** — the public API under
+`/api/public/unstable` plus the Langfuse CLI allow version-controlling
+widget definitions. Note that namespace is explicitly **unstable and may
+change**; if it churns, defining dashboards in the UI and documenting them
+here is an acceptable, honest fallback rather than a maintenance burden.
+
+**Caution:** widget-level environment filters override the dashboard-level
+selector. Since every experiment score is force-set to `sdk-experiment`, do
+not add environment filters at all — they can only mislead here.
+
+**PII:** dashboards aggregate scores (numbers, and judge `comment` strings).
+No new category of data leaves the machine beyond what
+`observability-plan.md` §5 already covers, and masking still applies at the
+export boundary. **Judge reasons are free text and can quote the model's
+output** — that is not new in R3, but it is worth re-confirming with whoever
+owns data protection before widening dashboard access beyond the current
+audience.
+
+**Exit criteria:** one dashboard shows ≥2 metrics across ≥2 runs, scores and
+latency, grouped by run label.
+
+---
+
+## 6. Phase R4 — Monitoring and alerting
+
+**Bucket 1.** Uses Langfuse **Monitors**, so nothing is built here.
+
+Configure monitors over scores with **warning** and **alert** thresholds:
+
+- Per-metric quality floor (`avg(value)` below threshold on the newest run).
+- `p95(app_latency_ms)` ceiling.
+- **`count` no-data / low-count monitor** — catches "the suite silently
+  stopped running," which is the failure most likely to go unnoticed and is
+  invisible to any quality threshold.
+
+Use **no-data handling** deliberately: for an on-demand suite, "no scores in
+the last day" is normal, so prefer `NO_DATA` status without alerting, or
+alert only after a sustained absence. Getting this wrong is the fastest way
+to train everyone to ignore the alerts.
+
+Route to **Slack** and/or **GitHub Actions** (`workflow_dispatch`) — the
+latter can trigger this repo's own `langfuse-experiment.yml`, which the
+self-hosted runner will pick up now that it runs as a persistent `launchd`
+service.
+
+**Watch the plan limit** on number of monitors (2 on Hobby, 20 on Core).
+Prefer a few broad monitors over one per score name.
+
+**Cadence and cost discipline:** an alert that triggers a re-run triggers
+real judge spend and a real `POST /api/dev/reset` against a live instance.
+**Do not wire an alert straight into an automatic full-suite re-run.** Alert
+a human; let the human dispatch. This is the same live-application
+constraint that governs everything else here.
+
+**Exit criteria:** a deliberately-low score raises a warning in the chosen
+channel; a skipped run raises the no-data monitor.
+
+---
+
+## 7. Phase R5 — Drill-down (S5)
+
+**Bucket 1.** Documentation plus one small helper; no new data collected.
+
+The path from a moved number to evidence, to be written into `README.md`:
+
+1. **Dashboard** → the metric and run whose score moved.
+2. **Langfuse trace** → each score is attached to a `trace_id` *and* the
+   task `observation_id`, so the score links to the exact experiment item.
+   The judge's own `reason` is on the score as `comment` — usually enough to
+   see *why* it scored low.
+3. **Item detail** → the item span carries `experiment_name`,
+   `experiment_run_name` and the run metadata, with input/expected output
+   attached.
+4. **Application internals** → score metadata carries the application
+   `run_id`. `GET /api/agent/trace/{run_id}` gives the executed step
+   timeline with per-step `latency_ms`, `tools_selected`, `skipped_tools`
+   and `tool_calls`; `GET /api/eval/export/{run_id}` gives `tools_called`.
+   **This is where real debugging happens**, and it is unmasked and local —
+   whereas the Langfuse copy is masked by design.
+
+Add `compare_runs.py --explain <metric> <run_label>` to print, per scenario:
+score, judge reason, `run_id`, and the app trace URL — collapsing steps 1–4
+into one command.
+
+**Note the asymmetry deliberately:** Langfuse holds masked data; the
+application holds the unmasked detail. That is the correct arrangement
+(`observability-plan.md` §5), and it means deep debugging happens against the
+application, on this machine — not in a SaaS dashboard.
+
+**Exit criteria:** from a single moved number, reach the failing scenario's
+judge reason and the application's step timeline in under a minute.
+
+---
+
+## 8. Phase R6 — Only now, thresholds and gating
+
+**Bucket 1, but sequenced last on purpose.**
+
+`docs/judge-calibration.md` Phase 1 — the noise-band measurement — **still
+does not exist**, and without it there is no defensible answer to "is −0.04
+a regression?" Current literature on LLM-as-judge reliability reports
+meaningful within-judge variance run to run (one commonly cited figure is a
+coefficient of variation around 0.066, i.e. a few percent on a 0–1 score,
+with wide variation by task and rubric) — small, but the same order as many
+real regressions, which is exactly why guessing a threshold fails.
+
+Order of work:
+
+1. **Measure the band.** Run the suite N times (3–5) against an *unchanged*
+   application with identical measurement axes. The spread of each metric's
+   score across those runs is its noise floor. **This costs N full runs of
+   judge spend — budget it explicitly**, and it is the single highest-value
+   purchase in this plan.
+2. **Set per-metric tolerance** from that band, not one global number. A
+   metric judged per-chunk will be noisier than a deterministic one
+   (`tool_correctness_names` is deterministic and should have a near-zero
+   band; treat any movement there as real).
+3. **Prefer paired comparison.** Compare per scenario, then aggregate —
+   comparing only run-level means discards the pairing and hides a large
+   regression on one scenario offset by noise on another.
+4. **Only then** consider a CI gate, and only on metrics whose band is
+   narrow enough to justify one. `regression-testing-plan.md` §4 is explicit
+   that a gate built before this exists will fire on ordinary variance and
+   be disabled within a month.
+
+Until step 2 is done, **`compare_runs.py` reports; a human judges.**
+
+---
+
+## 9. Option 2 — custom dashboard: not now, and the triggers that would change that
+
+Do **not** build a custom dashboard. `regression-testing-plan.md` §4 already
+ruled it out as product surface rather than test infrastructure, and R3
+delivers S1–S3 with no UI code.
+
+Build one **only** if one of these becomes true, and record which:
+
+- The `release` verification gate fails *and* `traceName` is also unusable,
+  leaving no groupable per-run dimension.
+- A regulatory or data-protection decision forbids sending scores to
+  Langfuse Cloud, and self-hosting (`observability-plan.md` §5) is rejected
+  as too much platform to operate.
+- The needed view genuinely cannot be expressed in the Metrics API — the
+  concrete example being multi-axis correlation (score vs. latency vs. app
+  version on one chart), which the API's dimension model does not do well.
+
+If it ever happens, the cheapest honest version is a static HTML report
+generated by `compare_runs.py` from `results/scores.jsonl` — not a served
+web application. Everything needed is already in that file by R2.
+
+---
+
+## 10. Sequencing, cost, and what each phase does to the live instance
+
+| Phase | Depends on | Judge cost | Effect on live instance |
+|---|---|---|---|
+| R0 identity + fingerprint | — | none | 1 extra read per run (`/api/agent/trace/{run_id}`) |
+| R1 comparables + latency | R0 | none beyond today | reads only |
+| **R2 comparability guard** | R0, R1 | **none** | **none** (Langfuse reads only) |
+| R3 dashboards | R0 gate, R1 | none | none |
+| R4 monitors | R3 | none | none, unless an alert triggers a re-run — keep that human-gated |
+| R5 drill-down | R1 | none | reads only |
+| R6 noise band | R1 | **N full runs** | N full suites, each with per-metric resets |
+
+**Cadence opinion, unchanged:** run per meaningful checkpoint, not per
+commit and not nightly-by-default. A full 14-metric run costs the
+application's own LLM calls plus on the order of a hundred judge calls at
+`gpt-5.4-mini`. Two *labelled* runs around a known change are worth more
+than seven unlabelled nightly ones. R2 costs nothing and can run constantly.
+
+**Every comparison run needs `AML_RESET_BEFORE_RUN=true`** — and that
+**drops and recreates every table** on the target instance, once per
+investigate-based metric. On a live production instance this is the highest-risk
+routine operation in this repo; `CLAUDE.md`'s live-application constraints
+apply in full.
+
+---
+
+## 11. Open items to resolve before/while building
+
+1. **Verify `release` → `traceRelease`** end to end (gate on R3). Fallback:
+   `traceName`.
+2. ~~**`PlanAdherenceMetric` appears unblocked.**~~ **Verified passing end to
+   end 2026-07-31** (`run_all.py PlanAdherence` with
+   `AML_RESET_BEFORE_RUN=true` → `1/1 notebooks passed`, 65s). `README.md`,
+   `metric-notes.md`, `observability-plan.md` §3.3 and
+   `regression-testing-plan.md` corrected; expected result is now 14/14.
+
+   **Still outstanding, and it matters for R6:** do not let this metric into
+   a baseline built from runs that predate the unblock. A metric coming
+   online reads as a dramatic "improvement" that is nothing of the kind —
+   the comparison is "not scored" vs. "scored," not two measurements of
+   quality. Start its score history fresh, and treat its first runs as
+   establishing a baseline.
+
+   Also worth noting for R1/R2: `run_all.py` discards notebook output, so
+   **this verification produced a pass/fail and no recorded score.** The
+   number that would let anyone check this claim later does not exist
+   anywhere — which is precisely what `results/scores.jsonl` is for.
+3. **Ask for `build_version` on `/api/health`** (R0.4). Written up and ready
+   to send: [`docs/asks/build-version-request.md`](docs/asks/build-version-request.md).
+   Until it lands, some app changes are invisible to attribution.
+4. **Confirm the PII position on judge `comment` strings** with whoever owns
+   data protection before widening dashboard access (R3).
+5. **Decide who else needs to see this.** If the answer stays "only the
+   person who ran it," R3 could be deferred in favour of R2 alone — that is
+   the honest trigger `regression-testing-plan.md` §3 sets for adopting a
+   dashboard at all.
+
+---
+
+## 12. Honest summary
+
+**Option 1 works.** Langfuse gives dashboards, a metrics API, and threshold
+monitors with Slack/webhook/GitHub-Actions routing — S1, S2, S3, S5 and S6
+without building a UI. The one real constraint is that **run identity must
+travel as `release`, not as score metadata**, because metadata is not a
+dashboard dimension.
+
+**The highest-value phase is R2, not R3.** The refusal-to-compare guard is
+what makes every number downstream trustworthy, costs nothing to run, and
+works with or without Langfuse.
+
+**Latency must come from the application's own `latency_ms`,** never from
+Langfuse span duration, which includes judge time and would be a fabricated
+comparable.
+
+**Nothing here needs an application change** — except the one small,
+worthwhile ask for a build identifier, without which some regressions are
+genuinely unattributable.
+
+**Do not gate CI on any of this until R6 measures the noise band.** Report
+first; judge later.
