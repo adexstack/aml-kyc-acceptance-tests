@@ -48,6 +48,7 @@ them.
 | `AML_API_KEY_TEST_OPERATOR` | No | falls back to `AML_API_KEY` | Key for `POST /api/dev/reset` and `POST /api/mcp/invoke` |
 | `AML_EXPECTED_SEED_VERSION` | No | `scenarios-v1` | Guards against goldens being graded against different seed data |
 | `AML_RESET_BEFORE_RUN` | No | `false` | When `true`, calls `POST /api/dev/reset` before the run. See "Repeat runs" |
+| `AML_RUN_LABEL` | No | UTC timestamp of the run, e.g. `20260731T155633Z` | `run_experiment.py` only. Names the run everywhere it is stored. Pass it per run on the command line, not in `.env` — see "Comparing runs" |
 
 Leaving the API keys blank is correct when the application runs with
 `AUTH_MODE=off`, which is its default.
@@ -300,6 +301,24 @@ an instance serving the known synthetic seed data — see
 Label a run and its scores become comparable later; leave it unlabelled and
 they get a UTC timestamp, which is only useful if you remember which
 timestamp was which.
+
+`AML_RUN_LABEL` is the only thing that differs between an unlabelled and a
+labelled run. It travels to three places, which is why the same string shows
+up in the UI, in a dashboard group-by, and in a script:
+
+| Where it lands | As | Why that place |
+|---|---|---|
+| `Langfuse(release=…)` | the `traceRelease` dimension | the only per-run key you can **group a dashboard by** — score metadata cannot be grouped on |
+| `run_experiment(run_name=…)` | `aml-acceptance-summarization - <label>` | what you read in the Langfuse runs list |
+| `Evaluation(metadata=…)` | `run_label` on every score | what `compare_runs.py` groups and filters by |
+
+So a run started **without** `AML_RUN_LABEL` appears as
+`aml-acceptance-summarization - 20260731T155633Z` (the UTC time the process
+started), and one started **with** `AML_RUN_LABEL=verify-summarization`
+appears as `aml-acceptance-summarization - verify-summarization`. Same
+command, same metric, same scores — only the label differs. Set it per run
+on the command line; putting it in `.env` would stamp every future run with
+one label and silently merge unrelated runs.
 
 ```bash
 AML_RUN_LABEL=before-planner-fix AML_RESET_BEFORE_RUN=true \
