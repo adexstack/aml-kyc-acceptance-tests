@@ -259,8 +259,10 @@ once per investigate-based metric.
 
 Each run also appends to two gitignored files: `results/runs.jsonl` (one row
 per experiment, with the `experiment_id` join key and the run's fingerprint)
-and `results/scores.jsonl` (every score `compare_runs.py` has read). Both are
-plain JSONL you can `grep` without a dashboard login.
+and `results/scores.jsonl` (every score `compare_runs.py` has read, with its
+judge reason, its fingerprint, and the Langfuse `trace_id`/`observation_id`
+to drill down with). Both are plain JSONL you can `grep` without a dashboard
+login.
 
 `!!` in the output means "worth a look", not "failed": the judge-noise band
 (`docs/judge-calibration.md` Phase 1) does not exist yet, so nothing here

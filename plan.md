@@ -511,6 +511,14 @@ channel; a skipped run raises the no-data monitor.
 
 ## 7. Phase R5 — Drill-down (S5)
 
+**Partly built 2026-07-31: the keys are now persisted.** `compare_runs.py`
+requests `fields="details,subject"` and stores `trace_id` and
+`observation_id` on every row of `results/scores.jsonl`, so step 2 below is
+reachable from the local artifact rather than only from the Langfuse UI.
+Verified against the UI's own score export: both ids match for all rows.
+Still unbuilt: the `--explain` command and the written-up path in
+`README.md`.
+
 **Bucket 1.** Documentation plus one small helper; no new data collected.
 
 The path from a moved number to evidence, to be written into `README.md`:
@@ -532,7 +540,9 @@ The path from a moved number to evidence, to be written into `README.md`:
 
 Add `compare_runs.py --explain <metric> <run_label>` to print, per scenario:
 score, judge reason, `run_id`, and the app trace URL — collapsing steps 1–4
-into one command.
+into one command. Everything it needs is already in `results/scores.jsonl`:
+the judge reason as `comment`, the application `run_id` in metadata, and the
+Langfuse `trace_id`/`observation_id` alongside them.
 
 **Note the asymmetry deliberately:** Langfuse holds masked data; the
 application holds the unmasked detail. That is the correct arrangement

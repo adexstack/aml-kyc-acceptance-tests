@@ -210,6 +210,27 @@ def test_identical_fingerprints_report_no_application_change():
     assert compare_runs.app_change(axes, "a", "b") == "no application change"
 
 
+class _Subject:
+    def __init__(self, kind, id, trace_id=None):
+        self.kind, self.id, self.trace_id = kind, id, trace_id
+
+
+def test_observation_subject_yields_both_drill_down_keys():
+    assert compare_runs.subject_ids(_Subject("observation", "obs1", "trace1")) == \
+        ("trace1", "obs1")
+
+
+def test_trace_subject_has_no_observation():
+    assert compare_runs.subject_ids(_Subject("trace", "trace1")) == ("trace1", None)
+
+
+def test_unknown_subject_yields_nothing_rather_than_a_borrowed_id():
+    # A session or experiment id is not a trace id. Reusing one would produce
+    # a drill-down link that resolves to the wrong thing.
+    assert compare_runs.subject_ids(_Subject("session", "sess1")) == (None, None)
+    assert compare_runs.subject_ids(None) == (None, None)
+
+
 def test_latency_uses_a_relative_notability_rule():
     # 0.05 absolute is meaningless on a millisecond scale.
     assert compare_runs.notable("app_latency_ms", 7000, 9200)

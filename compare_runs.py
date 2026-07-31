@@ -81,6 +81,22 @@ def parse_since(text: str) -> datetime:
 # Reading scores
 # ---------------------------------------------------------------------------
 
+def subject_ids(subject) -> tuple[str | None, str | None]:
+    """(trace_id, observation_id) from a score's `subject`.
+
+    Experiment scores are attached to an observation, which carries its own
+    `trace_id`; scores attached directly to a trace have no observation.
+    Anything else (session, experiment) has neither, and returning None is
+    the honest answer rather than reusing an id that means something else.
+    """
+    kind = getattr(subject, "kind", None)
+    if kind == "observation":
+        return getattr(subject, "trace_id", None), subject.id
+    if kind == "trace":
+        return subject.id, None
+    return None, None
+
+
 def fetch_scores(from_timestamp: datetime) -> list[dict]:
     """Every score stored since `from_timestamp`, as plain dicts.
 
@@ -90,10 +106,13 @@ def fetch_scores(from_timestamp: datetime) -> list[dict]:
     "sdk-experiment", so it carries no information and filtering on it can
     only mislead.
 
-    `fields="details"` is load-bearing: the v3 score API returns only core
-    fields by default, so without it every score comes back with
+    `fields="details,subject"` is load-bearing: the v3 score API returns only
+    core fields by default, so without `details` every score comes back with
     `metadata=None` and `comment=None` - i.e. no run identity at all, and a
-    comparison that silently finds nothing. Verified against the live API
+    comparison that silently finds nothing. `subject` adds the trace and
+    observation ids, which are the drill-down keys (plan.md §R5): without
+    them a row in results/scores.jsonl cannot be traced back to the item that
+    produced it once Langfuse is out of reach. Verified against the live API
     2026-07-31.
     """
     from langfuse import Langfuse
@@ -112,19 +131,22 @@ def fetch_scores(from_timestamp: datetime) -> list[dict]:
     while True:
         page = langfuse.api.scores_v3.get_many_v3(from_timestamp=from_timestamp,
                                                   limit=100, cursor=cursor,
-                                                  fields="details")
+                                                  fields="details,subject")
         for score in page.data:
             metadata = getattr(score, "metadata", None) or {}
             if not isinstance(metadata, dict) or "run_label" not in metadata:
                 continue
             if not isinstance(getattr(score, "value", None), (int, float)):
                 continue  # categorical/text scores are not comparable as deltas
+            trace_id, observation_id = subject_ids(getattr(score, "subject", None))
             scores.append({
                 "id": score.id,
                 "name": score.name,
                 "value": float(score.value),
                 "timestamp": score.timestamp.isoformat() if score.timestamp else None,
                 "comment": score.comment,
+                "trace_id": trace_id,
+                "observation_id": observation_id,
                 "metadata": metadata,
             })
         cursor = page.meta.cursor
