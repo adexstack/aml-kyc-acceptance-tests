@@ -155,7 +155,8 @@ def test_a_response_with_no_run_identifier_fails_loudly():
 # ---------------------------------------------------------------------------
 
 def _score(label, name, value, timestamp, **overrides):
-    metadata = {"run_label": label, "judge_model": "gpt-5.4-mini",
+    metadata = {"run_label": label, "experiment": "aml-acceptance-tool-correctness",
+                "judge_model": "gpt-5.4-mini",
                 "seed_version": "scenarios-v1", "schema_version": "1.1.0",
                 "reset_before_run": "true", "harness_sha": "abc1234",
                 "scenario_count": "8", "app_model": "openai/gpt-4o-mini",
@@ -169,6 +170,63 @@ def _score(label, name, value, timestamp, **overrides):
 def _grouped(scores):
     values, axes, first_seen = compare_runs.group_by_label(scores)
     return values, axes, sorted(values, key=lambda label: first_seen[label])
+
+
+def test_the_same_score_name_from_two_experiments_is_two_different_measurements():
+    # app_latency_ms from a tool_correctness run times an investigation; from
+    # a summarization run it times a RAG query. Keyed by name alone they
+    # would produce a delta between two different operations.
+    values, _, _ = _grouped([
+        _score("a", "app_latency_ms", 7228, "2026-07-31T10:00:00+00:00"),
+        _score("b", "app_latency_ms", 9813, "2026-07-31T11:00:00+00:00",
+               experiment="aml-acceptance-summarization"),
+    ])
+    shared, unshared = compare_runs.shared_and_unshared(values, ["a", "b"])
+    assert shared == [], "runs of different experiments must share no comparable key"
+    assert unshared["a"] == [("aml-acceptance-tool-correctness", "app_latency_ms")]
+    assert unshared["b"] == [("aml-acceptance-summarization", "app_latency_ms")]
+
+
+def test_same_experiment_same_name_is_comparable():
+    values, _, _ = _grouped([
+        _score("a", "app_latency_ms", 7228, "2026-07-31T10:00:00+00:00"),
+        _score("b", "app_latency_ms", 9813, "2026-07-31T11:00:00+00:00"),
+    ])
+    shared, unshared = compare_runs.shared_and_unshared(values, ["a", "b"])
+    assert shared == [("aml-acceptance-tool-correctness", "app_latency_ms")]
+    assert unshared == {}
+
+
+def test_a_metric_the_other_run_did_not_attempt_is_not_called_incomplete(capsys):
+    # A filtered run is not a failed run. Only a metric missing from an
+    # experiment the other run DID execute is evidence of an incomplete run.
+    values, axes, _ = _grouped([
+        _score("a", "summarization", 0.6, "2026-07-31T10:00:00+00:00",
+               experiment="aml-acceptance-summarization"),
+        _score("a", "app_latency_ms", 100, "2026-07-31T10:00:01+00:00",
+               experiment="aml-acceptance-summarization"),
+        _score("b", "summarization", 0.7, "2026-07-31T11:00:00+00:00",
+               experiment="aml-acceptance-summarization"),
+    ])
+    compare_runs.print_table(values, axes, ["a", "b"], unsafe=False)
+    out = capsys.readouterr().out
+    assert "DID run in b, so this score is missing" in out  # same experiment -> suspicious
+    assert "was not run in" not in out
+
+
+def test_shared_metric_count_ignores_metrics_only_one_run_attempted(capsys):
+    values, axes, _ = _grouped([
+        _score("a", "tool_correctness_names", 1.0, "2026-07-31T10:00:00+00:00"),
+        _score("a", "summarization", 0.6, "2026-07-31T10:00:01+00:00",
+               experiment="aml-acceptance-summarization"),
+        _score("b", "tool_correctness_names", 1.0, "2026-07-31T11:00:00+00:00"),
+    ])
+    compare_runs.print_table(values, axes, ["a", "b"], unsafe=False)
+    out = capsys.readouterr().out
+    # The shared metric is scored once in each run, so the count guard must
+    # stay quiet rather than firing over a metric only one run attempted.
+    assert "scores per run (shared metrics only): a=1, b=1" in out
+    assert "do not carry the same number of scores" not in out
 
 
 def test_matched_runs_are_comparable():

@@ -69,6 +69,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import experiments.common as common
 from experiments.common import RUN_LABEL, MissingConfiguration, env, last_app_run, run_context
 from langfuse_mask import mask
 
@@ -147,6 +148,12 @@ def run_one(langfuse, build_fn) -> tuple[bool, str]:
 
     # Read after the spec is built: building it makes the calls that
     # populate the seed/scenario guards run_context() reports on.
+    #
+    # Naming the experiment before the run is what lets compare_runs.py key
+    # on (experiment, score name) rather than score name alone - see
+    # experiments/common.current_experiment. Experiments run sequentially
+    # here, so a module-level value is unambiguous.
+    common.current_experiment = spec["name"]
     context = run_context()
 
     try:

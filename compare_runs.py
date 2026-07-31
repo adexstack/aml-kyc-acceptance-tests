@@ -204,8 +204,21 @@ def persist(scores: list[dict]) -> int:
 def group_by_label(scores: list[dict]) -> tuple[dict, dict, dict]:
     """Returns (values, axes, first_seen) keyed by run label.
 
-    `values[label][metric]` is a list because a metric may score several
-    scenarios in one run; the table reports their mean and says how many.
+    `values[label][(experiment, metric)]` is a list because a metric may
+    score several scenarios in one run; the table reports their mean and says
+    how many. **The key is (experiment, metric), not metric.** A score name
+    is not an identity on its own: `app_latency_ms` from
+    aml-acceptance-tool-correctness times an investigation, and the same name
+    from aml-acceptance-summarization times a RAG query. Keyed by name alone
+    they produce a delta between two different operations, attributed to a
+    "prompt_version change" that is really two different prompts for two
+    different endpoints - a fabricated comparable of exactly the kind this
+    script exists to refuse.
+
+    Scores written before `experiment` was recorded fall back to
+    "unavailable" and so still group by name alone, which is the old
+    behaviour and the best that can be done with them.
+
     `axes[label][axis]` is the SET of values seen, so a label reused across
     two different configurations is visible rather than silently collapsed.
 
@@ -223,7 +236,8 @@ def group_by_label(scores: list[dict]) -> tuple[dict, dict, dict]:
     for score in scores:
         metadata = score["metadata"]
         label = metadata["run_label"]
-        values[label][score["name"]].append(score["value"])
+        experiment = str(metadata.get("experiment") or UNAVAILABLE)
+        values[label][(experiment, score["name"])].append(score["value"])
         for axis in MEASUREMENT_AXES + APPLICATION_AXES:
             axes[label][axis].add(str(metadata.get(axis, UNAVAILABLE)))
         stamp = score.get("timestamp")
@@ -308,35 +322,70 @@ def notable(metric: str, baseline: float, current: float) -> bool:
     return abs(current - baseline) >= NOTABLE_DELTA
 
 
+def shared_and_unshared(values: dict, labels: list[str]) -> tuple[list, dict]:
+    """Split the (experiment, metric) keys into those every label scored and
+    those only some did. Only the first group can honestly be compared."""
+    per_label = {label: set(values[label]) for label in labels}
+    shared = set.intersection(*per_label.values()) if per_label else set()
+    unshared = {label: sorted(per_label[label] - shared) for label in labels}
+    return sorted(shared), {k: v for k, v in unshared.items() if v}
+
+
 def print_table(values: dict, axes: dict, labels: list[str], *, unsafe: bool) -> None:
     baseline, current = labels[0], labels[-1]
-    metrics = sorted({m for label in labels for m in values[label]})
-    width = max([len(m) for m in metrics] + [len("metric")])
+    shared, unshared = shared_and_unshared(values, labels)
     marker = " UNSAFE" if unsafe else ""
 
     print(f"baseline: {baseline}    current: {current}"
           + (f"    (+{len(labels) - 2} run(s) between)" if len(labels) > 2 else ""))
-    print(f"{'metric':<{width}}  {'baseline':>10}  {'current':>10}  {'delta':>9}   "
-          f"app change")
-    for metric in metrics:
-        before = values[baseline].get(metric)
-        after = values[current].get(metric)
-        if not before or not after:
-            missing = baseline if not before else current
-            print(f"{metric:<{width}}  {'-':>10}  {'-':>10}  {'-':>9}   "
-                  f"!! not scored in {missing} - an incomplete run, not a change{marker}")
-            continue
-        b, a = sum(before) / len(before), sum(after) / len(after)
-        flag = " !!" if notable(metric, b, a) else "   "
-        print(f"{metric:<{width}}  {b:>10.3f}  {a:>10.3f}  {a - b:>+9.3f}{flag} "
-              f"{app_change(axes, baseline, current)}{marker}")
 
-    counts = {label: sum(len(v) for v in values[label].values()) for label in labels}
-    print("\nscores per run: " + ", ".join(f"{label}={counts[label]}" for label in labels))
+    width = max([len(m) for _, m in shared] + [len("metric")])
+    experiments = sorted({experiment for experiment, _ in shared})
+    for experiment in experiments:
+        if len(experiments) > 1 or experiment != UNAVAILABLE:
+            print(f"\n  {experiment}")
+        print(f"{'metric':<{width}}  {'baseline':>10}  {'current':>10}  {'delta':>9}   "
+              f"app change")
+        for key in [k for k in shared if k[0] == experiment]:
+            metric = key[1]
+            before, after = values[baseline][key], values[current][key]
+            b, a = sum(before) / len(before), sum(after) / len(after)
+            flag = " !!" if notable(metric, b, a) else "   "
+            print(f"{metric:<{width}}  {b:>10.3f}  {a:>10.3f}  {a - b:>+9.3f}{flag} "
+                  f"{app_change(axes, baseline, current)}{marker}")
+
+    if unshared:
+        print("\nnot compared - scored in some runs but not all:")
+        for label, keys in unshared.items():
+            for experiment, metric in keys:
+                other = [l for l in labels if l != label]
+                sibling_experiments = {e for l in other for e, _ in values[l]}
+                if experiment == UNAVAILABLE:
+                    verdict = ("recorded before `experiment` was stamped, so a filtered "
+                               "run cannot be told from a failed one")
+                elif experiment in sibling_experiments:
+                    verdict = (f"!! {experiment} DID run in {', '.join(other)}, so this "
+                               f"score is missing - an incomplete run, not a change")
+                else:
+                    verdict = f"{experiment} was not run in {', '.join(other)}"
+                print(f"  {metric:<{width}}  only in {label}   {verdict}")
+
+    if any(experiment == UNAVAILABLE for experiment, _ in shared):
+        print(
+            "\nWARNING: some scores carry no `experiment`, so they were matched by name\n"
+            "  alone. That is the pre-2026-07-31 storage format, and name alone is not an\n"
+            "  identity: app_latency_ms from one experiment times an investigation and\n"
+            "  from another times a RAG query. Re-run both labels to get keyed scores."
+        )
+
+    counts = {label: sum(len(v) for k, v in values[label].items() if k in shared)
+              for label in labels}
+    print("\nscores per run (shared metrics only): "
+          + ", ".join(f"{label}={counts[label]}" for label in labels))
     if len(set(counts.values())) > 1:
-        print("  !! the runs do not carry the same number of scores. A partially failed "
-              "run\n     looks exactly like a quality change - check before reading the "
-              "deltas.")
+        print("  !! the runs do not carry the same number of scores for the metrics they "
+              "share.\n     A partially failed run looks exactly like a quality change - "
+              "check before\n     reading the deltas.")
     if all(axis_value(axes, label, "app_build") == UNAVAILABLE for label in labels):
         print(
             "\nWARNING: app_build is 'unavailable' for every run compared, so application\n"
@@ -452,6 +501,9 @@ def main() -> int:
                              "labelled UNSAFE")
     parser.add_argument("--offline", action="store_true",
                         help="read results/scores.jsonl instead of querying Langfuse")
+    parser.add_argument("--all", action="store_true",
+                        help="compare every label in the window instead of the two most "
+                             "recent")
     parser.add_argument("--list", action="store_true",
                         help="list the run labels in the window and exit")
     parser.add_argument("--explain", nargs=2, metavar=("METRIC", "LABEL"),
@@ -490,7 +542,21 @@ def main() -> int:
                   f"({sum(len(v) for v in values[label].values())} scores)")
         return 0
 
-    labels = args.runs or ordered
+    if args.runs:
+        labels = args.runs
+    elif args.all:
+        labels = ordered
+    else:
+        # Every label in the window is almost never the question being asked -
+        # a week of runs of different metrics compared as one set is noise, and
+        # it buries whichever two you actually cared about. Default to the two
+        # most recent; --runs and --all are there for anything else.
+        labels = ordered[-2:]
+        if len(ordered) > 2:
+            print(f"comparing the 2 most recent of {len(ordered)} labels in this window. "
+                  f"Use --runs A B [C ...] to pick others, or --all for every label.\n"
+                  f"  others: {', '.join(ordered[:-2])}\n")
+
     unknown = [label for label in labels if label not in values]
     if unknown:
         print(f"No scores found for run label(s) {unknown} in the window since "
@@ -510,6 +576,28 @@ def main() -> int:
     if problems:
         print_refusal(axes, labels, problems)
         print("\n--force given: comparing anyway.\n")
+
+    # Nothing in common is a different refusal from "the axes moved", and
+    # --force cannot help: there is no shared measurement to print. This is
+    # what comparing a tool_correctness run with a summarization run looks
+    # like, and by name alone it would have produced an app_latency_ms delta
+    # between an investigation and a RAG query.
+    shared, _ = shared_and_unshared(values, labels)
+    if not shared:
+        print(f"REFUSING TO COMPARE {' vs '.join(labels)}\n")
+        for label in labels:
+            experiments = sorted({e for e, _ in values[label]})
+            print(f"  {label:<24} ran {', '.join(experiments)}")
+        print(
+            "\nThese runs scored no metric in common, so there is nothing to compare.\n"
+            "A score name is not an identity by itself: app_latency_ms from one\n"
+            "experiment times an investigation and from another times a RAG query.\n"
+            "Comparing them by name would be a delta between two different operations.\n"
+            "\nRun the same experiment under both labels, e.g.\n"
+            "  AML_RUN_LABEL=a uv run python run_experiment.py summarization\n"
+            "  AML_RUN_LABEL=b uv run python run_experiment.py summarization"
+        )
+        return 2
 
     print_table(values, axes, labels, unsafe=bool(problems))
     return 0

@@ -329,8 +329,15 @@ AML_RUN_LABEL=after-planner-fix AML_RESET_BEFORE_RUN=true \
 
 uv run python compare_runs.py --list                 # what labels exist
 uv run python compare_runs.py --runs before-planner-fix after-planner-fix
+uv run python compare_runs.py                        # the two most recent labels
+uv run python compare_runs.py --all                  # every label in the window
 uv run python compare_runs.py --offline              # from results/scores.jsonl
 ```
+
+With no `--runs`, it compares the **two most recent** labels and names the
+others it skipped. A week of unrelated runs compared as one set is noise,
+and it buries whichever two you actually cared about; `--all` restores that
+behaviour when you genuinely want a trend across many labels.
 
 **Give Langfuse a moment before comparing.** Scores become queryable a few
 seconds to a couple of minutes after a run finishes, so a comparison started
@@ -362,7 +369,41 @@ Exit codes, so a script or CI step can act on the result:
 |---|---|
 | `0` | Compared. Also what `--force` returns after printing `UNSAFE` rows |
 | `1` | Could not compare: no scores in the window, an unknown label, or fewer than two labels |
-| `2` | **Refused** — a measurement axis differs. The axis diff is printed with `CHANGED` beside the offending row |
+| `2` | **Refused.** Either a measurement axis differs (printed with `CHANGED` beside the offending row), or the runs scored no metric in common. `--force` overrides the first, and cannot override the second — there is nothing shared to print |
+
+#### What counts as "the same metric"
+
+Scores are matched on **(experiment, score name)**, not score name alone,
+and this matters more than it sounds:
+
+```
+aml-acceptance-tool-correctness / app_latency_ms   times an investigation
+aml-acceptance-summarization    / app_latency_ms   times a RAG query
+```
+
+Matched by name, those two produce a delta between different operations,
+attributed to a `prompt_version` change that is really just two different
+prompts for two different endpoints. So comparing a `tool_correctness` run
+against a `summarization` run **refuses** rather than printing that number:
+
+```
+REFUSING TO COMPARE keyed-tool vs keyed-summ
+  keyed-tool               ran aml-acceptance-tool-correctness
+  keyed-summ               ran aml-acceptance-summarization
+These runs scored no metric in common, so there is nothing to compare.
+```
+
+Runs that overlap partially — a full-suite run against a filtered one —
+compare the metrics they share, and list the rest under "not compared",
+distinguishing the two cases that look identical in the data:
+
+- the other run **never attempted** that experiment → `<experiment> was not
+  run in <label>`, which is information, not a fault
+- the other run **did** run that experiment but the score is missing → `!!
+  … an incomplete run, not a change`, which is a real alarm
+
+`scores per run` counts only the shared metrics, so a filtered run no longer
+trips the partial-run warning.
 
 A guard nobody has seen fire is indistinguishable from one that never fires.
 Two ways to prove this one does:
