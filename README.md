@@ -346,6 +346,60 @@ different judge model, seed version, contract version, reset setting,
 harness commit or scenario count means the instrument moved rather than the
 thing being measured. `--force` overrides that and labels every row `UNSAFE`.
 
+#### The comparability guard, and how to check it is really working
+
+**This guard exists only in `compare_runs.py`. Langfuse has no equivalent.**
+A Langfuse chart will put any two runs side by side quite happily — it knows
+nothing about judge models, seed versions or harness commits, so it cannot
+tell you a delta is confounded. Being able to chart two runs in the UI is
+therefore not evidence that comparing them is valid, and it does not
+contradict a refusal here. That asymmetry is the whole reason the guard
+lives in the script.
+
+Exit codes, so a script or CI step can act on the result:
+
+| Exit | Meaning |
+|---|---|
+| `0` | Compared. Also what `--force` returns after printing `UNSAFE` rows |
+| `1` | Could not compare: no scores in the window, an unknown label, or fewer than two labels |
+| `2` | **Refused** — a measurement axis differs. The axis diff is printed with `CHANGED` beside the offending row |
+
+A guard nobody has seen fire is indistinguishable from one that never fires.
+Two ways to prove this one does:
+
+```bash
+# 1. Offline, free, no Langfuse: one case per measurement axis.
+uv run pytest tests/test_run_comparison.py -k "blocks_the_comparison" -v
+# -> 6 passed  (judge_model, seed_version, schema_version,
+#               reset_before_run, harness_sha, scenario_count)
+
+# 2. End to end, if you want to watch it happen on your own runs.
+#    tool_correctness is deterministic, so this costs NO judge calls -
+#    only the application's own LLM calls for one investigation each.
+#    Swapping the judge model is the cheapest axis to move deliberately:
+#    it changes what is recorded without changing what is measured here.
+AML_RUN_LABEL=guard-a uv run python run_experiment.py tool_correctness
+DEEPEVAL_JUDGE_MODEL=gpt-5.4 AML_RUN_LABEL=guard-b \
+  uv run python run_experiment.py tool_correctness
+uv run python compare_runs.py --runs guard-a guard-b --since 1h; echo "exit=$?"
+```
+
+The second prints `REFUSING TO COMPARE guard-a vs guard-b` with
+`judge_model … CHANGED` and `exit=2`. Add `--force` to the same command and
+it returns `exit=0` with every row tagged `UNSAFE` — that pair of outcomes,
+on the same two runs, is the check that the guard is load-bearing rather
+than decorative.
+
+**Not seeing a refusal you expected?** In order of likelihood:
+
+| What happened | Symptom |
+|---|---|
+| You compared in the Langfuse UI | No guard there at all — see above |
+| `--force` was passed | Table prints, `exit=0`, every row tagged `UNSAFE` |
+| A label is outside `--since` | `No scores found for run label(s) …`, `exit=1` — not a refusal |
+| `--offline` on a machine that did not run them | `results/` is gitignored, so another machine's runs are not in your local `scores.jsonl`. Drop `--offline` to read from Langfuse |
+| The axes genuinely match | It compares, and that is the guard passing — not failing |
+
 `AML_RESET_BEFORE_RUN=true` is not optional for a comparison run — the
 planner skips tools already completed for a case, so a reset run and an
 un-reset one produce different tool plans for reasons unrelated to quality.

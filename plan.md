@@ -427,6 +427,20 @@ delta table with app attribution. **Met 2026-07-31** — `verify-a` vs
 model changed) refused, naming `judge_model`, and exited 2. `--force` and
 `--offline` both exercised.
 
+**Keep the guard falsifiable.** A refusal nobody has seen fire cannot be
+told apart from one that never fires, and the axes are exactly the kind of
+thing a refactor breaks silently. The runnable check — the per-axis unit
+tests plus a deliberately-mismatched pair of live runs, with the exit codes
+each produces — is written up in `README.md` under "The comparability guard,
+and how to check it is really working". Re-run it after touching
+`run_context()` or `MEASUREMENT_AXES`.
+
+**Worth stating explicitly because it has already caused confusion:** this
+guard exists only in `compare_runs.py`. Langfuse will chart any two runs
+side by side regardless of whether they are comparable, so a chart in the UI
+is not evidence that a comparison is valid, and it does not contradict a
+refusal here.
+
 **One measurement worth carrying into R6:** `verify-a` and `verify-b` are
 two runs of the *same* metric against the *unchanged* application, and their
 `app_latency_ms` differs by 19% (9509 → 7684 ms). Quality scores were
