@@ -335,8 +335,14 @@ separate explicit authorization (`CLAUDE.md`, `performance-latency-plan.md`
 all carrying `traceRelease` and full metadata. **Met 2026-07-31** — one
 `tool_correctness` run emitted `tool_correctness_names`,
 `tool_correctness_arguments`, `app_latency_ms`, `app_latency_tool_call_ms`
-and `app_latency_synthesis_ms` (no `app_latency_retrieval_ms`: that run had
-no timed retrieval step, and an absent score is the honest result).
+and `app_latency_synthesis_ms`; one `summarization` run emitted
+`summarization`, `app_latency_ms` and `app_latency_synthesis_ms`.
+
+`app_latency_retrieval_ms` never appeared, and the reason is the
+application, not the harness: its trace carries the retrieval step with
+`latency_ms: null` (verified on a `rag_query` trace). An absent score is the
+honest result — but it means whole-run minus synthesis is **unattributed
+time**, not retrieval time. See `performance-latency-plan.md` §3 Phase 0.
 
 ---
 

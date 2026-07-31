@@ -37,7 +37,32 @@ plus this notebook's own overhead added 900ms on top."
 
 ## 3. What to build, ordered by value
 
-### Phase 0 — Record what every run already produces (no application change, near-zero cost)
+### Phase 0 — Record what every run already produces — **done 2026-07-31**
+
+Built as the `app_latency_*` scores (`plan.md` §R1.2): `app_latency_ms` from
+the response the task already fetches, and `app_latency_retrieval_ms` /
+`_tool_call_ms` / `_synthesis_ms` summed per step type from
+`GET /api/agent/trace/{run_id}`. They are stored beside the quality scores,
+so they share the same history, the same comparison and the same
+`compare_runs.py` output. No new load: every number comes from a call the
+suite was making anyway. The original statement of the phase follows.
+
+> **Two limits found while building it, both worth knowing before reading
+> the numbers.**
+>
+> 1. **Retrieval is not timed by the application.** Verified 2026-07-31 on a
+>    `rag_query` run: the trace carries `steps[0].type == "retrieval"` with
+>    `latency_ms: null`, and only the synthesis step is timed. So
+>    `app_latency_retrieval_ms` is simply absent for those runs — the harness
+>    emits nothing rather than a fabricated `0`. The practical consequence is
+>    that `app_latency_ms` minus `app_latency_synthesis_ms` (9275 − 3006 ms
+>    on that run) is **unattributed**, not "retrieval time". Timing that step
+>    is the application's job (bucket 2) if the split is ever needed.
+> 2. **Run-to-run latency variance is large.** Two runs of the same metric
+>    against an unchanged application differed by 19% on `app_latency_ms`
+>    (9509 → 7684 ms), and a third by 24%. Any threshold set without
+>    measuring that spread first will fire constantly — the argument
+>    `plan.md` §R6 makes for judge scores applies to latency too.
 
 Every investigation this suite triggers already returns `latency_ms` per
 step. Capture it in the same history mechanism as
