@@ -64,13 +64,27 @@ reachability before running anything:
 
 ```bash
 curl -s "$AML_API_BASE_URL/api/health"
-# {"status":"ok","schema_version":"1.0.0","eval_tracing":true}
+# {"status":"ok","schema_version":"1.1.0","eval_tracing":true,"build_version":"0.1.0+unknown"}
 ```
 
 Every notebook performs this check itself in its configuration cell and stops
-with a specific message if the application is unreachable, the schema version
-differs, or the seed version does not match the one the goldens were authored
-against.
+with a specific message if the application is unreachable, the contract
+version is incompatible, or the seed version does not match the one the
+goldens were authored against.
+
+Two fields on that payload matter to more than reachability:
+
+- **`schema_version`** is the API contract version. These tests were written
+  against `1.0.0` and accept any `1.x`: a MINOR bump is additive by the
+  application's own contract policy. A MAJOR change raises, because fields
+  may have been removed or retyped.
+- **`build_version`** identifies the deployed code, and is what makes a score
+  change attributable to an application change rather than judge noise. The
+  application documents `"<version>+unknown"` as its fallback when the image
+  was built without git metadata — a constant, which is why this harness
+  records it as `unavailable` rather than as a build identity. If you see
+  `+unknown`, the build is not passing its commit into the image; see
+  [docs/asks/build-version-request.md](docs/asks/build-version-request.md).
 
 ## Running
 
@@ -211,6 +225,100 @@ to the variables above. It applies the same PII-masking function to
 everything it sends and refuses to run unless `AML_API_BASE_URL` resolves to
 an instance serving the known synthetic seed data — see
 `docs/observability-plan.md` §5 for the PII stance this repo holds itself to.
+
+### Comparing runs
+
+Label a run and its scores become comparable later; leave it unlabelled and
+they get a UTC timestamp, which is only useful if you remember which
+timestamp was which.
+
+```bash
+AML_RUN_LABEL=before-planner-fix AML_RESET_BEFORE_RUN=true \
+  uv run python run_experiment.py
+# ... change the application ...
+AML_RUN_LABEL=after-planner-fix AML_RESET_BEFORE_RUN=true \
+  uv run python run_experiment.py
+
+uv run python compare_runs.py --list                 # what labels exist
+uv run python compare_runs.py --runs before-planner-fix after-planner-fix
+uv run python compare_runs.py --offline              # from results/scores.jsonl
+```
+
+**Give Langfuse a moment before comparing.** Scores become queryable a few
+seconds to a couple of minutes after a run finishes, so a comparison started
+immediately can read a partial set — which `compare_runs.py` will correctly
+flag as "the runs do not carry the same number of scores." Re-run it; if the
+counts still differ once ingestion has settled, that is a genuinely
+incomplete run rather than a quality change.
+
+`compare_runs.py` is read-only and costs **no judge calls** — it queries
+stored scores and prints a table, so run it as often as you like. It
+**refuses, with a non-zero exit, when the two runs are not comparable**: a
+different judge model, seed version, contract version, reset setting,
+harness commit or scenario count means the instrument moved rather than the
+thing being measured. `--force` overrides that and labels every row `UNSAFE`.
+
+`AML_RESET_BEFORE_RUN=true` is not optional for a comparison run — the
+planner skips tools already completed for a case, so a reset run and an
+un-reset one produce different tool plans for reasons unrelated to quality.
+Note that reset **drops and recreates every table** on the target instance,
+once per investigate-based metric.
+
+Each run also appends to two gitignored files: `results/runs.jsonl` (one row
+per experiment, with the `experiment_id` join key and the run's fingerprint)
+and `results/scores.jsonl` (every score `compare_runs.py` has read, with its
+judge reason, its fingerprint, and the Langfuse `trace_id`/`observation_id`
+to drill down with). Both are plain JSONL you can `grep` without a dashboard
+login.
+
+`!!` in the output means "worth a look", not "failed": the judge-noise band
+(`docs/judge-calibration.md` Phase 1) does not exist yet, so nothing here
+gates anything. See `plan.md` §R6.
+
+### From a moved number to the evidence
+
+A delta on its own tells you nothing about *why*. `--explain` collapses the
+whole path into one command:
+
+```bash
+uv run python compare_runs.py --explain tool_correctness_names after-planner-fix
+```
+
+It prints, for each item that metric scored in that run:
+
+- the score, and the **judge's own reason** — usually enough on its own to
+  see why it scored the way it did
+- the **application fingerprint** (`run_id`, model, prompt version,
+  temperature, build) and the **measurement axes** (judge, seed, contract,
+  reset, harness commit) — so you can tell "the app changed" from "the
+  instrument changed" without leaving the output
+- two ready-to-run `curl`s against the application, and a deep link to the
+  Langfuse trace focused on that score's own observation
+
+If you prefer to walk it yourself, the same four steps are:
+
+1. **`compare_runs.py`** (or a Langfuse chart) — which metric and which run
+   moved.
+2. **The judge's reason** — stored as the score's `comment`, printed by
+   `--explain`, and shown on the score in Langfuse.
+3. **The Langfuse item** — the item span carries the experiment name, run
+   name, run metadata, and the input/expected output. Reach it via the URL
+   `--explain` prints, or from `trace_id`/`observation_id` in
+   `results/scores.jsonl`.
+4. **The application's own internals** — `GET /api/agent/trace/{run_id}`
+   gives the step timeline with per-step `latency_ms`, `tools_selected`,
+   `skipped_tools` and `tool_calls`; `GET /api/eval/export/{run_id}` gives
+   `input`, `actual_output` and `tools_called`. The score metadata carries
+   the `app_run_id` you need for both.
+
+**Note the asymmetry, it matters:** Langfuse holds a *masked* copy
+(`docs/observability-plan.md` §5), while the application holds the unmasked
+detail and is local. Step 4 is where real debugging happens; steps 1–3 tell
+you where to point it.
+
+`--explain` works with `--offline` too — it prints the trace and observation
+ids instead of a clickable URL, since building one needs the project id from
+the API.
 
 ### CI: on-demand dispatch via a self-hosted runner
 

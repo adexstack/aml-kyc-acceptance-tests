@@ -22,7 +22,8 @@ in-memory values.
 
 from __future__ import annotations
 
-from experiments.common import JUDGE_MODEL, api, item_input, load_scenarios, maybe_reset
+from experiments.common import (JUDGE_MODEL, api, app_latency, item_input, load_scenarios,
+                                maybe_reset, record_app_run, run_context)
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +99,11 @@ def _assemble_conversation(case_id: str) -> dict:
         "investigation_calls": investigation_calls,
         "final_answer": export["actual_output"],
         "direct_calls": direct_calls,
+        # The investigation is the application run this conversation is
+        # about; the two direct MCP probes are the harness's own additions.
+        # So the fingerprint and app_latency_ms describe the investigation,
+        # not the assembled transcript's total wall-clock.
+        "app_run": record_app_run(investigation),
     }
 
 
@@ -201,10 +207,11 @@ def tool_use_experiment() -> dict:
         metric = ToolUseMetric(available_tools=available_tools, threshold=0.5,
                                model=JUDGE_MODEL, include_reason=True, async_mode=False)
         metric.measure(tc)
-        return Evaluation(name="tool_use", value=metric.score, comment=metric.reason)
+        return Evaluation(name="tool_use", value=metric.score, comment=metric.reason,
+                          metadata=run_context(output.get("app_run"), _kwargs.get("metadata")))
 
     return {"name": "aml-acceptance-tool-use", "data": data, "task": task,
-            "evaluators": [tool_use]}
+            "evaluators": [tool_use, app_latency]}
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +284,8 @@ def multi_turn_mcp_use_experiment() -> dict:
                                        include_reason=True, async_mode=False)
         metric.measure(tc)
         return Evaluation(name="multi_turn_mcp_use", value=metric.score,
-                          comment=metric.reason)
+                          comment=metric.reason,
+                          metadata=run_context(output.get("app_run"), _kwargs.get("metadata")))
 
     def primitive_accuracy(*, output, expected_output, **_kwargs):
         # Re-measures to read the sub-score lists. Cheap relative to the
@@ -304,13 +312,16 @@ def multi_turn_mcp_use_experiment() -> dict:
         tool_scores = [s for s, _ in (getattr(metric, "tools_scores_reasons_list", None) or [])]
         arg_scores = [s for s, _ in (getattr(metric, "args_scores_reasons_list", None) or [])]
         mean = lambda xs: sum(xs) / len(xs) if xs else None
+        context = run_context(output.get("app_run"), _kwargs.get("metadata"))
         return [
-            Evaluation(name="mcp_primitive_accuracy", value=mean(tool_scores)),
-            Evaluation(name="mcp_argument_accuracy", value=mean(arg_scores)),
+            Evaluation(name="mcp_primitive_accuracy", value=mean(tool_scores),
+                       metadata=context),
+            Evaluation(name="mcp_argument_accuracy", value=mean(arg_scores),
+                       metadata=context),
         ]
 
     return {"name": "aml-acceptance-multi-turn-mcp-use", "data": data, "task": task,
-            "evaluators": [multi_turn_mcp_use, primitive_accuracy]}
+            "evaluators": [multi_turn_mcp_use, primitive_accuracy, app_latency]}
 
 
 # ---------------------------------------------------------------------------
@@ -380,7 +391,10 @@ def turn_relevancy_experiment() -> dict:
         for recorded in sorted(conversation["turns"], key=lambda t: t["turn_index"]):
             turns.append({"role": "user", "content": recorded["question"]})
             turns.append({"role": "assistant", "content": recorded["answer"]})
-        return {"turns": turns}
+        # Fingerprint from the first turn - model and prompt_version are
+        # the same across the thread. No latency score is emitted for this
+        # metric (see the evaluators list below).
+        return {"turns": turns, "app_run": record_app_run(responses[0])}
 
     def turn_relevancy(*, output, **_kwargs):
         from deepeval.metrics import TurnRelevancyMetric
@@ -392,8 +406,14 @@ def turn_relevancy_experiment() -> dict:
         metric = TurnRelevancyMetric(threshold=0.5, model=JUDGE_MODEL, include_reason=True,
                                      async_mode=False, window_size=10)
         metric.measure(tc)
-        return Evaluation(name="turn_relevancy", value=metric.score, comment=metric.reason)
+        return Evaluation(name="turn_relevancy", value=metric.score, comment=metric.reason,
+                          metadata=run_context(output.get("app_run"), _kwargs.get("metadata")))
 
+    # No `app_latency` here, deliberately: this task makes three application
+    # calls and none of them is "the" run this metric is about. Emitting one
+    # turn's latency under the same score name as every other metric's
+    # whole-run latency, or summing three turns into one number, would both
+    # be fabricated comparables (docs/performance-latency-plan.md §5).
     return {"name": "aml-acceptance-turn-relevancy", "data": data, "task": task,
             "evaluators": [turn_relevancy]}
 

@@ -17,7 +17,8 @@ run_experiment.py's docstring.
 
 from __future__ import annotations
 
-from experiments.common import JUDGE_MODEL, api, item_input, load_scenarios, maybe_reset
+from experiments.common import (JUDGE_MODEL, api, app_latency, item_input, load_scenarios,
+                                maybe_reset, record_app_run, run_context)
 
 
 def _rag_query(case_id, question, *, top_k=8, include_history=False):
@@ -56,7 +57,8 @@ def answer_relevancy_experiment() -> dict:
     def task(*, item, **_kwargs):
         i = item_input(item)
         body = _rag_query(i["case_id"], i["question"])
-        return {"question": body["question"], "answer": body["answer"]}
+        return {"question": body["question"], "answer": body["answer"],
+                "app_run": record_app_run(body)}
 
     def answer_relevancy(*, output, **_kwargs):
         from deepeval.metrics import AnswerRelevancyMetric
@@ -67,10 +69,11 @@ def answer_relevancy_experiment() -> dict:
                                         include_reason=True, async_mode=False)
         tc = LLMTestCase(input=output["question"], actual_output=output["answer"])
         metric.measure(tc)
-        return Evaluation(name="answer_relevancy", value=metric.score, comment=metric.reason)
+        return Evaluation(name="answer_relevancy", value=metric.score, comment=metric.reason,
+                          metadata=run_context(output.get("app_run"), _kwargs.get("metadata")))
 
     return {"name": "aml-acceptance-answer-relevancy", "data": data, "task": task,
-            "evaluators": [answer_relevancy]}
+            "evaluators": [answer_relevancy, app_latency]}
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +103,8 @@ def pii_leakage_experiment() -> dict:
     def task(*, item, **_kwargs):
         i = item_input(item)
         body = _rag_query(i["case_id"], i["question"])
-        return {"question": body["question"], "answer": body["answer"]}
+        return {"question": body["question"], "answer": body["answer"],
+                "app_run": record_app_run(body)}
 
     def pii_leakage(*, output, **_kwargs):
         from deepeval.metrics import PIILeakageMetric
@@ -114,10 +118,11 @@ def pii_leakage_experiment() -> dict:
                                    include_reason=True, async_mode=False)
         tc = LLMTestCase(input=output["question"], actual_output=output["answer"])
         metric.measure(tc)
-        return Evaluation(name="pii_leakage", value=metric.score, comment=metric.reason)
+        return Evaluation(name="pii_leakage", value=metric.score, comment=metric.reason,
+                          metadata=run_context(output.get("app_run"), _kwargs.get("metadata")))
 
     return {"name": "aml-acceptance-pii-leakage", "data": data, "task": task,
-            "evaluators": [pii_leakage]}
+            "evaluators": [pii_leakage, app_latency]}
 
 
 # ---------------------------------------------------------------------------
@@ -171,7 +176,7 @@ def summarization_experiment() -> dict:
         body = api("POST", "/api/rag/query", json_body={
             "question": i["question"], "top_k": 10, "include_history": False,
         })
-        return {"answer": body["answer"]}
+        return {"answer": body["answer"], "app_run": record_app_run(body)}
 
     def summarization(*, output, expected_output, **_kwargs):
         from deepeval.metrics import SummarizationMetric
@@ -182,10 +187,11 @@ def summarization_experiment() -> dict:
                                       include_reason=True, async_mode=False)
         tc = LLMTestCase(input=expected_output, actual_output=output["answer"])
         metric.measure(tc)
-        return Evaluation(name="summarization", value=metric.score, comment=metric.reason)
+        return Evaluation(name="summarization", value=metric.score, comment=metric.reason,
+                          metadata=run_context(output.get("app_run"), _kwargs.get("metadata")))
 
     return {"name": "aml-acceptance-summarization", "data": data, "task": task,
-            "evaluators": [summarization]}
+            "evaluators": [summarization, app_latency]}
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +229,8 @@ def hallucination_experiment() -> dict:
     def task(*, item, **_kwargs):
         i = item_input(item)
         body = _rag_query(i["case_id"], i["question"])
-        return {"question": body["question"], "answer": body["answer"]}
+        return {"question": body["question"], "answer": body["answer"],
+                "app_run": record_app_run(body)}
 
     def hallucination(*, output, expected_output, **_kwargs):
         from deepeval.metrics import HallucinationMetric
@@ -237,10 +244,11 @@ def hallucination_experiment() -> dict:
         tc = LLMTestCase(input=output["question"], actual_output=output["answer"],
                           context=expected_output)
         metric.measure(tc)
-        return Evaluation(name="hallucination", value=metric.score, comment=metric.reason)
+        return Evaluation(name="hallucination", value=metric.score, comment=metric.reason,
+                          metadata=run_context(output.get("app_run"), _kwargs.get("metadata")))
 
     return {"name": "aml-acceptance-hallucination", "data": data, "task": task,
-            "evaluators": [hallucination]}
+            "evaluators": [hallucination, app_latency]}
 
 
 EXPERIMENTS = [

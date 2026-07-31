@@ -18,6 +18,17 @@ Usage:
     uv run python run_experiment.py tool_correctness  # substring filter
     uv run python run_experiment.py --list
 
+    # A labelled run, which is what makes it comparable later:
+    AML_RUN_LABEL=before-planner-fix AML_RESET_BEFORE_RUN=true \
+        uv run python run_experiment.py
+    uv run python compare_runs.py --runs before-planner-fix after-planner-fix
+
+AML_RUN_LABEL defaults to a UTC timestamp, travels as the Langfuse
+`release` (the groupable dashboard dimension), as the run name, and in
+every score's metadata - plan.md §R0.1. Each experiment also appends a row
+to results/runs.jsonl (gitignored) carrying its experiment_id and the run's
+measurement/application fingerprint.
+
 Requires in .env (see .env.example): AML_API_BASE_URL, OPENAI_API_KEY,
 LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_BASE_URL (EU region host,
 confirmed 2026-07-29 by inspecting langfuse==4.14.1's own source for which
@@ -53,9 +64,12 @@ behaviour. See experiments/common.maybe_reset().
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 
-from experiments.common import JUDGE_MODEL, MissingConfiguration, env
+from experiments.common import RUN_LABEL, MissingConfiguration, env, last_app_run, run_context
 from langfuse_mask import mask
 
 import experiments.conversational as conversational
@@ -86,7 +100,15 @@ def _build_client():
     # inspecting the installed langfuse==4.14.1 package -
     # inspect.signature(get_client) accepts only `public_key`; `mask` is a
     # Langfuse.__init__-only parameter.
-    langfuse = Langfuse(mask=mask)
+    #
+    # release=RUN_LABEL is load-bearing, not cosmetic (plan.md §1): it is
+    # applied as an OpenTelemetry resource attribute and surfaces as the
+    # `traceRelease` dimension, which IS groupable in the Metrics API and
+    # Custom Dashboards. Score metadata is not - so a run labelled only in
+    # metadata gives you a working script and a useless dashboard.
+    # `environment` cannot be used for this: the SDK hardcodes every
+    # experiment span to "sdk-experiment".
+    langfuse = Langfuse(mask=mask, release=RUN_LABEL)
     if not langfuse.auth_check():
         raise MissingConfiguration(
             "Langfuse rejected LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY - no project "
@@ -97,26 +119,67 @@ def _build_client():
     return langfuse
 
 
+MANIFEST_PATH = Path(__file__).resolve().parent / "results" / "runs.jsonl"
+
+
+def _append_manifest(row: dict) -> None:
+    """One line per experiment in results/runs.jsonl (gitignored).
+
+    `experiment_id` is the only precise per-run join key: it is generated
+    per run_experiment() call for local (non-Dataset) items, appears nowhere
+    by default, and cannot be reconstructed after the fact. The manifest is
+    also what makes a comparison auditable when Langfuse is unreachable -
+    docs/regression-testing-plan.md Phase 0 says to persist this regardless
+    of Langfuse.
+    """
+    MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with MANIFEST_PATH.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, default=str) + "\n")
+
+
 def run_one(langfuse, build_fn) -> tuple[bool, str]:
     """Build and run one metric's experiment. Returns (passed, detail)."""
+    started_at = datetime.now(timezone.utc).isoformat()
     try:
         spec = build_fn()
     except Exception as exc:  # noqa: BLE001 - report, don't crash the whole suite
         return False, f"{exc.__class__.__name__} while building: {exc}"
 
+    # Read after the spec is built: building it makes the calls that
+    # populate the seed/scenario guards run_context() reports on.
+    context = run_context()
+
     try:
         result = langfuse.run_experiment(
             name=spec["name"],
+            # Without this the SDK names runs "{name} - {iso_timestamp}",
+            # which is only navigable if you remember which timestamp was
+            # which run.
+            run_name=f"{spec['name']} - {RUN_LABEL}",
             data=spec["data"],
             task=spec["task"],
             evaluators=spec["evaluators"],
             max_concurrency=1,  # each item performs real LLM/tool calls; see plan.md §1.4
-            metadata={"schema_version": "1.0.0", "judge_model": JUDGE_MODEL},
+            metadata=context,
         )
     except Exception as exc:  # noqa: BLE001
         return False, f"{exc.__class__.__name__} while running: {exc}"
 
     print(result.format())
+    print(f"run_label={RUN_LABEL}  experiment_id={result.experiment_id}  "
+          f"run_name={result.run_name}")
+    _append_manifest({
+        "run_label": RUN_LABEL,
+        "experiment": spec["name"],
+        "experiment_id": result.experiment_id,
+        "run_name": result.run_name,
+        "started_at": started_at,
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+        # Re-read now that the task has run: the application axes are only
+        # known once a call has been made, so the pre-run context above
+        # carries the measurement axes and honest "unavailable"s.
+        **run_context(last_app_run()),
+    })
     return True, ""
 
 
