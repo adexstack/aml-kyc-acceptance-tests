@@ -215,10 +215,79 @@ above stays Langfuse-free and installable offline by design; see
 [`docs/observability-plan.md`](docs/observability-plan.md) §3.1 for why.
 
 ```bash
-uv sync --extra langfuse
+uv sync --extra langfuse                           # once per checkout - see below
 uv run python run_experiment.py                    # all 14 metrics
 uv run python run_experiment.py tool_correctness    # substring filter on experiment names
+uv run python run_experiment.py --list              # what you can filter on
 ```
+
+### Which argument selects which metric
+
+**The two runners take different names, and this trips people up.**
+`run_all.py` filters on the *notebook filename* (`SummarizationMetric`);
+`run_experiment.py` filters on the *experiment function name*
+(`summarization`). Both are case-insensitive substring matches, so
+`run_experiment.py SummarizationMetric` matches nothing — it fails loudly and
+prints the valid names rather than silently running zero metrics.
+
+**`uv run python run_experiment.py --list` is the source of truth.** The
+table below is checked against it by `tests/test_run_comparison.py`, so it
+cannot drift silently.
+
+| Metric | `run_all.py` (notebooks) | `run_experiment.py` (Langfuse) | Score name(s) emitted |
+|---|---|---|---|
+| AnswerRelevancy | `AnswerRelevancy` | `answer_relevancy` | `answer_relevancy` |
+| PIILeakage | `PIILeakage` | `pii_leakage` | `pii_leakage` |
+| Summarization | `Summarization` | `summarization` | `summarization` |
+| Hallucination | `Hallucination` | `hallucination` | `hallucination` |
+| ContextualPrecision | `ContextualPrecision` | `contextual_precision` | `contextual_precision` |
+| ContextualRecall | `ContextualRecall` | `contextual_recall` | `contextual_recall` |
+| ToolCorrectness | `ToolCorrectness` | `tool_correctness` | `tool_correctness_names`, `tool_correctness_arguments` |
+| ArgumentCorrectness | `ArgumentCorrectness` | `argument_correctness` | `argument_correctness` |
+| Bias | `Bias` | `bias` | `bias` |
+| PromptAlignment | `PromptAlignment` | `prompt_alignment` | `prompt_alignment` |
+| PlanAdherence | `PlanAdherence` | `plan_adherence` | `plan_adherence` |
+| ToolUse | `ToolUse` | `tool_use` | `tool_use` |
+| MultiTurnMCPUse | `MultiTurnMCPUse` | `multi_turn_mcp_use` | `multi_turn_mcp_use`, `mcp_primitive_accuracy`, `mcp_argument_accuracy` |
+| TurnRelevancy | `TurnRelevancy` | `turn_relevancy` | `turn_relevancy` |
+
+So the Summarization equivalent of the ToolCorrectness example is:
+
+```bash
+uv run python run_experiment.py summarization
+```
+
+Every experiment except `turn_relevancy` also emits `app_latency_ms`, and the
+investigate- and query-based ones add `app_latency_retrieval_ms`,
+`app_latency_tool_call_ms` and `app_latency_synthesis_ms` where the run
+actually has steps of that type. `turn_relevancy` emits no latency score on
+purpose — it makes three application calls and none of them is "the" run the
+metric is about.
+
+**Score names are an API.** Renaming one silently breaks every Langfuse
+dashboard widget, saved filter and monitor pointing at it, and orphans the
+history in `results/scores.jsonl`. Treat a rename as a breaking change and
+record it in `docs/metric-notes.md`.
+
+### When you need `uv sync --extra langfuse`
+
+**Once per checkout, not per run.** Verified against uv 0.11.24:
+
+- `uv run python run_experiment.py` does **not** strip the extra — once
+  installed, it stays installed, so the sync line is not part of the
+  run-a-comparison loop.
+- Re-run it after `git pull` changes `pyproject.toml` or `uv.lock`.
+- **A later plain `uv sync` removes it again** — `uv sync` makes the
+  environment match exactly what you asked for, and without `--extra
+  langfuse` that means uninstalling `langfuse` and 6 OpenTelemetry/protobuf
+  packages. If `run_experiment.py` suddenly fails with
+  `ModuleNotFoundError: No module named 'langfuse'`, this is why; re-run the
+  sync.
+
+If you would rather not think about it, `uv run --extra langfuse python
+run_experiment.py …` installs-if-missing on every invocation and is always
+safe. The offline suite (`run_all.py`, the 14 notebooks) never needs any of
+this — it must stay Langfuse-free, per `docs/observability-plan.md` §3.1.
 
 Needs `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` in `.env`, in addition
 to the variables above. It applies the same PII-masking function to

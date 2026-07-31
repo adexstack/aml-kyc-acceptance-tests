@@ -16,6 +16,8 @@ No network: every test substitutes the cached /api/health payload.
 
 from __future__ import annotations
 
+import pathlib
+
 import pytest
 
 import compare_runs
@@ -232,6 +234,45 @@ def test_identical_fingerprints_report_no_application_change():
         _score("b", "bias", 0.2, "2026-07-31T11:00:00+00:00"),
     ])
     assert compare_runs.app_change(axes, "a", "b") == "no application change"
+
+
+# ---------------------------------------------------------------------------
+# The README's metric-argument table must stay true
+# ---------------------------------------------------------------------------
+
+def _readme_experiment_filters() -> set[str]:
+    """The `run_experiment.py` column of the table in README.md."""
+    readme = (pathlib.Path(__file__).resolve().parent.parent / "README.md").read_text()
+    table = readme.split("| Metric | `run_all.py`")[1].split("\n\n")[0]
+    filters = set()
+    for line in table.splitlines():
+        cells = [c.strip() for c in line.split("|")]
+        if len(cells) >= 5 and cells[3].startswith("`") and "---" not in cells[1]:
+            filters.add(cells[3].strip("`"))
+    return filters
+
+
+def test_readme_documents_every_experiment_and_no_others():
+    # The table tells people what to type. A metric added or renamed without
+    # updating it sends them to a filter that matches nothing.
+    import run_experiment
+
+    documented = _readme_experiment_filters()
+    actual = {fn.__name__.removesuffix("_experiment") for fn in run_experiment.ALL_EXPERIMENTS}
+    assert documented == actual, (
+        f"README metric table is out of date.\n"
+        f"  documented but gone: {sorted(documented - actual)}\n"
+        f"  missing from README: {sorted(actual - documented)}"
+    )
+
+
+def test_every_documented_filter_actually_selects_exactly_one_experiment():
+    import run_experiment
+
+    for name in _readme_experiment_filters():
+        matched = [fn for fn in run_experiment.ALL_EXPERIMENTS
+                   if name.lower() in fn.__name__.lower()]
+        assert len(matched) == 1, f"filter {name!r} matches {[f.__name__ for f in matched]}"
 
 
 class _Subject:
