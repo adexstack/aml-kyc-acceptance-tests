@@ -70,7 +70,7 @@ def answer_relevancy_experiment() -> dict:
         tc = LLMTestCase(input=output["question"], actual_output=output["answer"])
         metric.measure(tc)
         return Evaluation(name="answer_relevancy", value=metric.score, comment=metric.reason,
-                          metadata=run_context(output.get("app_run")))
+                          metadata=run_context(output.get("app_run"), _kwargs.get("metadata")))
 
     return {"name": "aml-acceptance-answer-relevancy", "data": data, "task": task,
             "evaluators": [answer_relevancy, app_latency]}
@@ -119,7 +119,7 @@ def pii_leakage_experiment() -> dict:
         tc = LLMTestCase(input=output["question"], actual_output=output["answer"])
         metric.measure(tc)
         return Evaluation(name="pii_leakage", value=metric.score, comment=metric.reason,
-                          metadata=run_context(output.get("app_run")))
+                          metadata=run_context(output.get("app_run"), _kwargs.get("metadata")))
 
     return {"name": "aml-acceptance-pii-leakage", "data": data, "task": task,
             "evaluators": [pii_leakage, app_latency]}
@@ -188,7 +188,7 @@ def summarization_experiment() -> dict:
         tc = LLMTestCase(input=expected_output, actual_output=output["answer"])
         metric.measure(tc)
         return Evaluation(name="summarization", value=metric.score, comment=metric.reason,
-                          metadata=run_context(output.get("app_run")))
+                          metadata=run_context(output.get("app_run"), _kwargs.get("metadata")))
 
     return {"name": "aml-acceptance-summarization", "data": data, "task": task,
             "evaluators": [summarization, app_latency]}
@@ -245,7 +245,7 @@ def hallucination_experiment() -> dict:
                           context=expected_output)
         metric.measure(tc)
         return Evaluation(name="hallucination", value=metric.score, comment=metric.reason,
-                          metadata=run_context(output.get("app_run")))
+                          metadata=run_context(output.get("app_run"), _kwargs.get("metadata")))
 
     return {"name": "aml-acceptance-hallucination", "data": data, "task": task,
             "evaluators": [hallucination, app_latency]}

@@ -119,6 +119,30 @@ def test_agent_run_fingerprint_comes_from_the_response_without_extra_calls(monke
     assert context["app_temperature"] == "0.0"
 
 
+def test_scenario_is_recorded_for_drill_down_but_is_not_an_axis():
+    context = common.run_context(item_metadata={"scenario_id": "s3", "title": "..."})
+    assert context["item_scenario"] == "s3"
+    # It identifies the item, not the run: comparing two runs must not refuse
+    # because they scored different scenarios.
+    assert "item_scenario" not in common.MEASUREMENT_AXES + common.APPLICATION_AXES
+
+
+def test_caseless_item_records_not_applicable_for_scenario():
+    # The summarization and retrieval experiments query a document, not a case.
+    assert common.run_context(item_metadata={"document_type": "policy"})["item_scenario"] \
+        == common.NOT_APPLICABLE
+
+
+def test_latency_scores_carry_the_scenario_too(monkeypatch):
+    monkeypatch.setattr(common, "trace", lambda run_id: {"steps": []})
+    key = common.record_app_run({"run_id": 9, "model": "m", "prompt_version": "p",
+                                 "latency_ms": 1234})
+    evaluations = common.app_latency(output={"app_run": key},
+                                     metadata={"scenario_id": "s5"})
+    assert [e.name for e in evaluations] == ["app_latency_ms"]
+    assert evaluations[0].metadata["item_scenario"] == "s5"
+
+
 def test_a_response_with_no_run_identifier_fails_loudly():
     with pytest.raises(RuntimeError, match="no application run"):
         common.record_app_run({"answer": "..."})
@@ -229,6 +253,33 @@ def test_unknown_subject_yields_nothing_rather_than_a_borrowed_id():
     # a drill-down link that resolves to the wrong thing.
     assert compare_runs.subject_ids(_Subject("session", "sess1")) == (None, None)
     assert compare_runs.subject_ids(None) == (None, None)
+
+
+def test_explain_prints_the_reason_and_both_places_to_look(capsys):
+    scores = [_score("a", "bias", 0.1, "2026-07-31T10:00:00+00:00")]
+    scores[0]["comment"] = "the rationale mentions nationality"
+    scores[0]["trace_id"], scores[0]["observation_id"] = "trace1", "obs1"
+    assert compare_runs.explain(scores, "bias", "a") == 0
+    out = capsys.readouterr().out
+    assert "the rationale mentions nationality" in out
+    assert "/api/agent/trace/1" in out      # the unmasked, local evidence
+    assert "/api/eval/export/1" in out
+    assert "trace_id=trace1" in out          # offline: ids, not a URL
+
+
+def test_explain_names_what_the_run_did_score_when_the_metric_is_wrong(capsys):
+    scores = [_score("a", "bias", 0.1, "2026-07-31T10:00:00+00:00")]
+    assert compare_runs.explain(scores, "hallucination", "a") == 1
+    assert "It scored: ['bias']" in capsys.readouterr().err
+
+
+def test_explain_does_not_invent_a_curl_without_a_run_id(capsys):
+    scores = [_score("a", "contextual_recall", 0.8, "2026-07-31T10:00:00+00:00",
+                     app_run_id=common.UNAVAILABLE)]
+    compare_runs.explain(scores, "contextual_recall", "a")
+    out = capsys.readouterr().out
+    assert "no run id recorded" in out
+    assert "/api/agent/trace/" not in out
 
 
 def test_latency_uses_a_relative_notability_rule():

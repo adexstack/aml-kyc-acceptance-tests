@@ -244,6 +244,13 @@ uv run python compare_runs.py --runs before-planner-fix after-planner-fix
 uv run python compare_runs.py --offline              # from results/scores.jsonl
 ```
 
+**Give Langfuse a moment before comparing.** Scores become queryable a few
+seconds to a couple of minutes after a run finishes, so a comparison started
+immediately can read a partial set — which `compare_runs.py` will correctly
+flag as "the runs do not carry the same number of scores." Re-run it; if the
+counts still differ once ingestion has settled, that is a genuinely
+incomplete run rather than a quality change.
+
 `compare_runs.py` is read-only and costs **no judge calls** — it queries
 stored scores and prints a table, so run it as often as you like. It
 **refuses, with a non-zero exit, when the two runs are not comparable**: a
@@ -267,6 +274,51 @@ login.
 `!!` in the output means "worth a look", not "failed": the judge-noise band
 (`docs/judge-calibration.md` Phase 1) does not exist yet, so nothing here
 gates anything. See `plan.md` §R6.
+
+### From a moved number to the evidence
+
+A delta on its own tells you nothing about *why*. `--explain` collapses the
+whole path into one command:
+
+```bash
+uv run python compare_runs.py --explain tool_correctness_names after-planner-fix
+```
+
+It prints, for each item that metric scored in that run:
+
+- the score, and the **judge's own reason** — usually enough on its own to
+  see why it scored the way it did
+- the **application fingerprint** (`run_id`, model, prompt version,
+  temperature, build) and the **measurement axes** (judge, seed, contract,
+  reset, harness commit) — so you can tell "the app changed" from "the
+  instrument changed" without leaving the output
+- two ready-to-run `curl`s against the application, and a deep link to the
+  Langfuse trace focused on that score's own observation
+
+If you prefer to walk it yourself, the same four steps are:
+
+1. **`compare_runs.py`** (or a Langfuse chart) — which metric and which run
+   moved.
+2. **The judge's reason** — stored as the score's `comment`, printed by
+   `--explain`, and shown on the score in Langfuse.
+3. **The Langfuse item** — the item span carries the experiment name, run
+   name, run metadata, and the input/expected output. Reach it via the URL
+   `--explain` prints, or from `trace_id`/`observation_id` in
+   `results/scores.jsonl`.
+4. **The application's own internals** — `GET /api/agent/trace/{run_id}`
+   gives the step timeline with per-step `latency_ms`, `tools_selected`,
+   `skipped_tools` and `tool_calls`; `GET /api/eval/export/{run_id}` gives
+   `input`, `actual_output` and `tools_called`. The score metadata carries
+   the `app_run_id` you need for both.
+
+**Note the asymmetry, it matters:** Langfuse holds a *masked* copy
+(`docs/observability-plan.md` §5), while the application holds the unmasked
+detail and is local. Step 4 is where real debugging happens; steps 1–3 tell
+you where to point it.
+
+`--explain` works with `--offline` too — it prints the trace and observation
+ids instead of a clickable URL, since building one needs the project id from
+the API.
 
 ### CI: on-demand dispatch via a self-hosted runner
 

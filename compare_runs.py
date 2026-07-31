@@ -23,6 +23,7 @@ Usage:
     uv run python compare_runs.py --runs baseline-07-30 after-planner-change
     uv run python compare_runs.py --runs a b --force     # prints, labelled UNSAFE
     uv run python compare_runs.py --offline              # results/scores.jsonl only
+    uv run python compare_runs.py --explain bias after-planner-change   # drill down
 
 Requires LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_BASE_URL in
 .env, except with --offline. Every score it reads is also appended to
@@ -45,8 +46,8 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from experiments.common import (APPLICATION_AXES, MEASUREMENT_AXES, MissingConfiguration,
-                                UNAVAILABLE, env)
+from experiments.common import (API_BASE, APPLICATION_AXES, MEASUREMENT_AXES,
+                                MissingConfiguration, NOT_APPLICABLE, UNAVAILABLE, env)
 
 SCORES_PATH = Path(__file__).resolve().parent / "results" / "scores.jsonl"
 
@@ -97,7 +98,23 @@ def subject_ids(subject) -> tuple[str | None, str | None]:
     return None, None
 
 
-def fetch_scores(from_timestamp: datetime) -> list[dict]:
+def build_client():
+    """An authenticated Langfuse client, or a specific error about why not."""
+    from langfuse import Langfuse
+
+    env("LANGFUSE_PUBLIC_KEY", required=True)
+    env("LANGFUSE_SECRET_KEY", required=True)
+    langfuse = Langfuse()
+    if not langfuse.auth_check():
+        raise MissingConfiguration(
+            "Langfuse rejected LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY - no project found "
+            "for these credentials. Check LANGFUSE_BASE_URL points at the same region as "
+            "the keys."
+        )
+    return langfuse
+
+
+def fetch_scores(langfuse, from_timestamp: datetime) -> list[dict]:
     """Every score stored since `from_timestamp`, as plain dicts.
 
     Filtered client-side to scores carrying a `run_label` in metadata, i.e.
@@ -115,18 +132,6 @@ def fetch_scores(from_timestamp: datetime) -> list[dict]:
     produced it once Langfuse is out of reach. Verified against the live API
     2026-07-31.
     """
-    from langfuse import Langfuse
-
-    env("LANGFUSE_PUBLIC_KEY", required=True)
-    env("LANGFUSE_SECRET_KEY", required=True)
-    langfuse = Langfuse()
-    if not langfuse.auth_check():
-        raise MissingConfiguration(
-            "Langfuse rejected LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY - no project found "
-            "for these credentials. Check LANGFUSE_BASE_URL points at the same region as "
-            "the keys."
-        )
-
     scores, cursor = [], None
     while True:
         page = langfuse.api.scores_v3.get_many_v3(from_timestamp=from_timestamp,
@@ -153,7 +158,6 @@ def fetch_scores(from_timestamp: datetime) -> list[dict]:
         if not cursor:
             break
 
-    langfuse.shutdown()
     return scores
 
 
@@ -347,6 +351,94 @@ def print_table(values: dict, axes: dict, labels: list[str], *, unsafe: bool) ->
           "(plan.md §R6).")
 
 
+# ---------------------------------------------------------------------------
+# Drill-down (plan.md §R5)
+# ---------------------------------------------------------------------------
+
+def langfuse_url(langfuse, score: dict) -> str | None:
+    """Deep link to the score's own trace, focused on its observation."""
+    trace_id = score.get("trace_id")
+    if langfuse is None or not trace_id:
+        return None
+    url = langfuse.get_trace_url(trace_id=trace_id)
+    if url and score.get("observation_id"):
+        url = f"{url}?observation={score['observation_id']}"
+    return url
+
+
+def explain(scores: list[dict], metric: str, label: str, langfuse=None) -> int:
+    """Collapse "a number moved" -> "here is the evidence" into one command.
+
+    Prints, for each item scored by `metric` in run `label`: the score, the
+    judge's own reason, the application fingerprint, and the two places to
+    look next. The asymmetry between those two places is deliberate and
+    worth keeping in mind while reading the output: **the application holds
+    the unmasked detail and is local; the Langfuse copy is masked by
+    design** (docs/observability-plan.md §5). Real debugging happens against
+    the application.
+    """
+    rows = [s for s in scores
+            if s["name"] == metric and s["metadata"].get("run_label") == label]
+    if not rows:
+        in_label = sorted({s["name"] for s in scores
+                           if s["metadata"].get("run_label") == label})
+        if not in_label:
+            print(f"No scores stored for run label {label!r}. Known labels: "
+                  f"{sorted({s['metadata'].get('run_label') for s in scores})}",
+                  file=sys.stderr)
+        else:
+            print(f"Run {label!r} has no scores named {metric!r}. It scored: "
+                  f"{in_label}", file=sys.stderr)
+        return 1
+
+    for score in sorted(rows, key=lambda s: (str(s["metadata"].get("item_scenario")),
+                                             s["timestamp"] or "")):
+        metadata = score["metadata"]
+        run_id = metadata.get("app_run_id", UNAVAILABLE)
+        scenario = metadata.get("item_scenario")
+        print(f"\n{'=' * 78}\n{metric}   run={label}   score={score['value']:.3f}")
+        print(f"  scenario     {scenario if scenario is not None else 'not recorded'}"
+              f"   (scored {score['timestamp']})")
+        print(f"  application  run_id={run_id}  model={metadata.get('app_model')}  "
+              f"prompt={metadata.get('app_prompt_version')}  "
+              f"temp={metadata.get('app_temperature')}  build={metadata.get('app_build')}")
+        print(f"  measurement  judge={metadata.get('judge_model')}  "
+              f"seed={metadata.get('seed_version')}  "
+              f"contract={metadata.get('schema_version')}  "
+              f"reset={metadata.get('reset_before_run')}  "
+              f"harness={metadata.get('harness_sha')}")
+
+        print("\n  judge reason")
+        if score.get("comment"):
+            for line in str(score["comment"]).strip().splitlines():
+                print(f"    {line.strip()}")
+        else:
+            print("    (none - this metric records no reason, e.g. the app_latency_* "
+                  "scores,\n     which are measurements rather than judgements)")
+
+        print("\n  where to look next")
+        if str(run_id) not in ("", UNAVAILABLE, NOT_APPLICABLE, "None"):
+            print("    application - unmasked, local; this is where debugging happens:")
+            print(f"      curl -s '{API_BASE}/api/agent/trace/{run_id}'")
+            print("          step timeline, per-step latency_ms, tools_selected, "
+                  "skipped_tools, tool_calls")
+            print(f"      curl -s '{API_BASE}/api/eval/export/{run_id}'")
+            print("          input, actual_output, tools_called")
+        else:
+            print("    application - no run id recorded for this score, so there is "
+                  "nothing to fetch")
+        url = langfuse_url(langfuse, score)
+        if url:
+            print("    langfuse - masked copy; item input/expected output, run metadata:")
+            print(f"      {url}")
+        elif score.get("trace_id"):
+            print(f"    langfuse - trace_id={score['trace_id']} "
+                  f"observation_id={score.get('observation_id')}")
+            print("      (run without --offline for a clickable URL)")
+    print()
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -362,19 +454,32 @@ def main() -> int:
                         help="read results/scores.jsonl instead of querying Langfuse")
     parser.add_argument("--list", action="store_true",
                         help="list the run labels in the window and exit")
+    parser.add_argument("--explain", nargs=2, metavar=("METRIC", "LABEL"),
+                        help="drill down: print the score, the judge's reason, the "
+                             "application fingerprint and where to look next, for one "
+                             "metric in one run (e.g. --explain bias before-planner-fix)")
     args = parser.parse_args()
 
     since = parse_since(args.since)
-    scores = read_offline_scores(since) if args.offline else fetch_scores(since)
-    if not scores:
-        print(f"No labelled scores found since {since.isoformat()}. Either nothing has run "
-              f"in that window, or the scores predate run_context() being stamped on them.")
-        return 1
+    langfuse = None if args.offline else build_client()
+    try:
+        scores = read_offline_scores(since) if args.offline else fetch_scores(langfuse, since)
+        if not scores:
+            print(f"No labelled scores found since {since.isoformat()}. Either nothing has "
+                  f"run in that window, or the scores predate run_context() being stamped "
+                  f"on them.")
+            return 1
 
-    if not args.offline:
-        added = persist(scores)
-        print(f"{len(scores)} score(s) read, {added} new appended to "
-              f"{SCORES_PATH.relative_to(Path.cwd()) if SCORES_PATH.is_relative_to(Path.cwd()) else SCORES_PATH}\n")
+        if not args.offline:
+            added = persist(scores)
+            print(f"{len(scores)} score(s) read, {added} new appended to "
+                  f"{SCORES_PATH.relative_to(Path.cwd()) if SCORES_PATH.is_relative_to(Path.cwd()) else SCORES_PATH}\n")
+
+        if args.explain:
+            return explain(scores, args.explain[0], args.explain[1], langfuse)
+    finally:
+        if langfuse is not None:
+            langfuse.shutdown()
 
     values, axes, first_seen = group_by_label(scores)
     ordered = sorted(values, key=lambda label: first_seen.get(label, ""))

@@ -111,7 +111,7 @@ def contextual_precision_experiment() -> dict:
         metric.measure(tc)
         return Evaluation(name="contextual_precision", value=metric.score,
                            comment=metric.reason,
-                           metadata=run_context(output.get("app_run")))
+                           metadata=run_context(output.get("app_run"), _kwargs.get("metadata")))
 
     return _build("aml-acceptance-contextual-precision", contextual_precision)
 
@@ -134,7 +134,7 @@ def contextual_recall_experiment() -> dict:
         metric.measure(tc)
         return Evaluation(name="contextual_recall", value=metric.score,
                            comment=metric.reason,
-                           metadata=run_context(output.get("app_run")))
+                           metadata=run_context(output.get("app_run"), _kwargs.get("metadata")))
 
     return _build("aml-acceptance-contextual-recall", contextual_recall)
 

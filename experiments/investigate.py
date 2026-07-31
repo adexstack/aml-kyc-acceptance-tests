@@ -172,7 +172,7 @@ def tool_correctness_experiment() -> dict:
         metric.measure(tc)
         return Evaluation(name="tool_correctness_names", value=metric.score,
                           comment=metric.reason,
-                          metadata=run_context(output.get("app_run")))
+                          metadata=run_context(output.get("app_run"), _kwargs.get("metadata")))
 
     def tool_correctness_arguments(*, output, expected_output, **_kwargs):
         from deepeval.metrics import ToolCorrectnessMetric
@@ -187,7 +187,7 @@ def tool_correctness_experiment() -> dict:
         metric.measure(tc)
         return Evaluation(name="tool_correctness_arguments", value=metric.score,
                           comment=metric.reason,
-                          metadata=run_context(output.get("app_run")))
+                          metadata=run_context(output.get("app_run"), _kwargs.get("metadata")))
 
     return {"name": "aml-acceptance-tool-correctness", "data": data, "task": task,
             "evaluators": [tool_correctness_names, tool_correctness_arguments, app_latency]}
@@ -259,7 +259,7 @@ def argument_correctness_experiment() -> dict:
         metric.measure(tc)
         return Evaluation(name="argument_correctness", value=metric.score,
                           comment=metric.reason,
-                          metadata=run_context(output.get("app_run")))
+                          metadata=run_context(output.get("app_run"), _kwargs.get("metadata")))
 
     return {"name": "aml-acceptance-argument-correctness", "data": data, "task": task,
             "evaluators": [argument_correctness, app_latency]}
@@ -306,7 +306,7 @@ def bias_experiment() -> dict:
                             async_mode=False)
         metric.measure(tc)
         return Evaluation(name="bias", value=metric.score, comment=metric.reason,
-                          metadata=run_context(output.get("app_run")))
+                          metadata=run_context(output.get("app_run"), _kwargs.get("metadata")))
 
     return {"name": "aml-acceptance-bias", "data": data, "task": task,
             "evaluators": [bias, app_latency]}
@@ -410,7 +410,7 @@ def prompt_alignment_experiment() -> dict:
                                        include_reason=True, async_mode=False)
         metric.measure(tc)
         return Evaluation(name="prompt_alignment", value=metric.score, comment=metric.reason,
-                          metadata=run_context(output.get("app_run")))
+                          metadata=run_context(output.get("app_run"), _kwargs.get("metadata")))
 
     return {"name": "aml-acceptance-prompt-alignment", "data": data, "task": task,
             "evaluators": [prompt_alignment, app_latency]}
@@ -525,7 +525,7 @@ def plan_adherence_experiment() -> dict:
             )
 
         return Evaluation(name="plan_adherence", value=metric.score, comment=metric.reason,
-                          metadata=run_context(output.get("app_run")))
+                          metadata=run_context(output.get("app_run"), _kwargs.get("metadata")))
 
     return {"name": "aml-acceptance-plan-adherence", "data": data, "task": task,
             "evaluators": [plan_adherence, app_latency]}

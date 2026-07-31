@@ -208,7 +208,7 @@ def tool_use_experiment() -> dict:
                                model=JUDGE_MODEL, include_reason=True, async_mode=False)
         metric.measure(tc)
         return Evaluation(name="tool_use", value=metric.score, comment=metric.reason,
-                          metadata=run_context(output.get("app_run")))
+                          metadata=run_context(output.get("app_run"), _kwargs.get("metadata")))
 
     return {"name": "aml-acceptance-tool-use", "data": data, "task": task,
             "evaluators": [tool_use, app_latency]}
@@ -285,7 +285,7 @@ def multi_turn_mcp_use_experiment() -> dict:
         metric.measure(tc)
         return Evaluation(name="multi_turn_mcp_use", value=metric.score,
                           comment=metric.reason,
-                          metadata=run_context(output.get("app_run")))
+                          metadata=run_context(output.get("app_run"), _kwargs.get("metadata")))
 
     def primitive_accuracy(*, output, expected_output, **_kwargs):
         # Re-measures to read the sub-score lists. Cheap relative to the
@@ -312,7 +312,7 @@ def multi_turn_mcp_use_experiment() -> dict:
         tool_scores = [s for s, _ in (getattr(metric, "tools_scores_reasons_list", None) or [])]
         arg_scores = [s for s, _ in (getattr(metric, "args_scores_reasons_list", None) or [])]
         mean = lambda xs: sum(xs) / len(xs) if xs else None
-        context = run_context(output.get("app_run"))
+        context = run_context(output.get("app_run"), _kwargs.get("metadata"))
         return [
             Evaluation(name="mcp_primitive_accuracy", value=mean(tool_scores),
                        metadata=context),
@@ -407,7 +407,7 @@ def turn_relevancy_experiment() -> dict:
                                      async_mode=False, window_size=10)
         metric.measure(tc)
         return Evaluation(name="turn_relevancy", value=metric.score, comment=metric.reason,
-                          metadata=run_context(output.get("app_run")))
+                          metadata=run_context(output.get("app_run"), _kwargs.get("metadata")))
 
     # No `app_latency` here, deliberately: this task makes three application
     # calls and none of them is "the" run this metric is about. Emitting one

@@ -369,12 +369,22 @@ def last_app_run() -> str | None:
     return next(reversed(_app_runs), None) if _app_runs else None
 
 
-def run_context(app_run: str | None = None) -> dict[str, str]:
+def run_context(app_run: str | None = None,
+                item_metadata: dict | None = None) -> dict[str, str]:
     """The flat dict every Evaluation is stamped with (plan.md §R0.2).
 
     Values are flat strings on purpose: Langfuse flattens and serialises
     metadata on export (`_flatten_and_serialize_metadata_values`), so
-    anything nested comes back as an unqueryable blob.
+    anything nested comes back as an unqueryable blob. Note the round trip
+    is not lossless in the other direction either - Langfuse returns them
+    parsed, so "true" comes back as True; any reader must normalise.
+
+    `item_metadata` is the dataset item's own metadata, which the SDK passes
+    to every evaluator as `metadata`. Only the scenario id is taken from it,
+    and it is NOT an axis: it identifies which item a score belongs to, for
+    drill-down (`compare_runs.py --explain`), not which run. Items that are
+    genuinely caseless - the summarization and retrieval experiments query a
+    document, not a scenario - record "not_applicable".
     """
     context = {
         "run_label": RUN_LABEL,
@@ -384,6 +394,7 @@ def run_context(app_run: str | None = None) -> dict[str, str]:
         "reset_before_run": str(RESET_BEFORE_RUN).lower(),
         "harness_sha": harness_sha(),
         "scenario_count": _scenario_count,
+        "item_scenario": str((item_metadata or {}).get("scenario_id") or NOT_APPLICABLE),
         "app_build": app_build(),
         "app_model": UNAVAILABLE,
         "app_prompt_version": UNAVAILABLE,
@@ -443,7 +454,7 @@ def app_latency(*, output, **_kwargs):
             "return value in the returned dict - do not infer a latency from elsewhere."
         )
 
-    context = run_context(key)
+    context = run_context(key, _kwargs.get("metadata"))
     if record["latency_ms"] is None:
         raise RuntimeError(
             f"The application returned no latency_ms for run {record['app_run_id']}, so "

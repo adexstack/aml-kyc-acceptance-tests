@@ -511,13 +511,18 @@ channel; a skipped run raises the no-data monitor.
 
 ## 7. Phase R5 — Drill-down (S5)
 
-**Partly built 2026-07-31: the keys are now persisted.** `compare_runs.py`
-requests `fields="details,subject"` and stores `trace_id` and
-`observation_id` on every row of `results/scores.jsonl`, so step 2 below is
-reachable from the local artifact rather than only from the Langfuse UI.
-Verified against the UI's own score export: both ids match for all rows.
-Still unbuilt: the `--explain` command and the written-up path in
-`README.md`.
+**Built 2026-07-31.** `compare_runs.py --explain <metric> <run_label>`, the
+persisted `trace_id`/`observation_id` (both verified against the Langfuse
+UI's own score export), and the written-up path in `README.md`.
+
+One addition this phase forced, worth recording because it is not in the
+sketch below: **score metadata now carries `item_scenario`**, taken from the
+dataset item's own metadata, which the SDK already passes to every evaluator
+as `metadata`. Without it `--explain` cannot say *which item* a score
+belongs to once a metric scores more than one scenario — it would print rows
+it could not tell apart. It is deliberately **not** an axis: it identifies
+the item, not the run, so two runs that scored different scenarios must not
+be refused on account of it.
 
 **Bucket 1.** Documentation plus one small helper; no new data collected.
 
@@ -550,7 +555,10 @@ application holds the unmasked detail. That is the correct arrangement
 application, on this machine — not in a SaaS dashboard.
 
 **Exit criteria:** from a single moved number, reach the failing scenario's
-judge reason and the application's step timeline in under a minute.
+judge reason and the application's step timeline in under a minute. **Met
+2026-07-31** — one command prints the scenario, the score, the judge's
+reason, both fingerprint blocks, two ready-to-run `curl`s against the
+application, and a Langfuse URL focused on that score's own observation.
 
 ---
 
