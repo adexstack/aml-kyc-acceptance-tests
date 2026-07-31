@@ -48,6 +48,7 @@ them.
 | `AML_API_KEY_TEST_OPERATOR` | No | falls back to `AML_API_KEY` | Key for `POST /api/dev/reset` and `POST /api/mcp/invoke` |
 | `AML_EXPECTED_SEED_VERSION` | No | `scenarios-v1` | Guards against goldens being graded against different seed data |
 | `AML_RESET_BEFORE_RUN` | No | `false` | When `true`, calls `POST /api/dev/reset` before the run. See "Repeat runs" |
+| `AML_RUN_LABEL` | No | UTC timestamp of the run, e.g. `20260731T155633Z` | `run_experiment.py` only. Names the run everywhere it is stored. Pass it per run on the command line, not in `.env` — see "Comparing runs" |
 
 Leaving the API keys blank is correct when the application runs with
 `AUTH_MODE=off`, which is its default.
@@ -301,6 +302,24 @@ Label a run and its scores become comparable later; leave it unlabelled and
 they get a UTC timestamp, which is only useful if you remember which
 timestamp was which.
 
+`AML_RUN_LABEL` is the only thing that differs between an unlabelled and a
+labelled run. It travels to three places, which is why the same string shows
+up in the UI, in a dashboard group-by, and in a script:
+
+| Where it lands | As | Why that place |
+|---|---|---|
+| `Langfuse(release=…)` | the `traceRelease` dimension | the only per-run key you can **group a dashboard by** — score metadata cannot be grouped on |
+| `run_experiment(run_name=…)` | `aml-acceptance-summarization - <label>` | what you read in the Langfuse runs list |
+| `Evaluation(metadata=…)` | `run_label` on every score | what `compare_runs.py` groups and filters by |
+
+So a run started **without** `AML_RUN_LABEL` appears as
+`aml-acceptance-summarization - 20260731T155633Z` (the UTC time the process
+started), and one started **with** `AML_RUN_LABEL=verify-summarization`
+appears as `aml-acceptance-summarization - verify-summarization`. Same
+command, same metric, same scores — only the label differs. Set it per run
+on the command line; putting it in `.env` would stamp every future run with
+one label and silently merge unrelated runs.
+
 ```bash
 AML_RUN_LABEL=before-planner-fix AML_RESET_BEFORE_RUN=true \
   uv run python run_experiment.py
@@ -310,8 +329,15 @@ AML_RUN_LABEL=after-planner-fix AML_RESET_BEFORE_RUN=true \
 
 uv run python compare_runs.py --list                 # what labels exist
 uv run python compare_runs.py --runs before-planner-fix after-planner-fix
+uv run python compare_runs.py                        # the two most recent labels
+uv run python compare_runs.py --all                  # every label in the window
 uv run python compare_runs.py --offline              # from results/scores.jsonl
 ```
+
+With no `--runs`, it compares the **two most recent** labels and names the
+others it skipped. A week of unrelated runs compared as one set is noise,
+and it buries whichever two you actually cared about; `--all` restores that
+behaviour when you genuinely want a trend across many labels.
 
 **Give Langfuse a moment before comparing.** Scores become queryable a few
 seconds to a couple of minutes after a run finishes, so a comparison started
@@ -326,6 +352,94 @@ stored scores and prints a table, so run it as often as you like. It
 different judge model, seed version, contract version, reset setting,
 harness commit or scenario count means the instrument moved rather than the
 thing being measured. `--force` overrides that and labels every row `UNSAFE`.
+
+#### The comparability guard, and how to check it is really working
+
+**This guard exists only in `compare_runs.py`. Langfuse has no equivalent.**
+A Langfuse chart will put any two runs side by side quite happily — it knows
+nothing about judge models, seed versions or harness commits, so it cannot
+tell you a delta is confounded. Being able to chart two runs in the UI is
+therefore not evidence that comparing them is valid, and it does not
+contradict a refusal here. That asymmetry is the whole reason the guard
+lives in the script.
+
+Exit codes, so a script or CI step can act on the result:
+
+| Exit | Meaning |
+|---|---|
+| `0` | Compared. Also what `--force` returns after printing `UNSAFE` rows |
+| `1` | Could not compare: no scores in the window, an unknown label, or fewer than two labels |
+| `2` | **Refused.** Either a measurement axis differs (printed with `CHANGED` beside the offending row), or the runs scored no metric in common. `--force` overrides the first, and cannot override the second — there is nothing shared to print |
+
+#### What counts as "the same metric"
+
+Scores are matched on **(experiment, score name)**, not score name alone,
+and this matters more than it sounds:
+
+```
+aml-acceptance-tool-correctness / app_latency_ms   times an investigation
+aml-acceptance-summarization    / app_latency_ms   times a RAG query
+```
+
+Matched by name, those two produce a delta between different operations,
+attributed to a `prompt_version` change that is really just two different
+prompts for two different endpoints. So comparing a `tool_correctness` run
+against a `summarization` run **refuses** rather than printing that number:
+
+```
+REFUSING TO COMPARE keyed-tool vs keyed-summ
+  keyed-tool               ran aml-acceptance-tool-correctness
+  keyed-summ               ran aml-acceptance-summarization
+These runs scored no metric in common, so there is nothing to compare.
+```
+
+Runs that overlap partially — a full-suite run against a filtered one —
+compare the metrics they share, and list the rest under "not compared",
+distinguishing the two cases that look identical in the data:
+
+- the other run **never attempted** that experiment → `<experiment> was not
+  run in <label>`, which is information, not a fault
+- the other run **did** run that experiment but the score is missing → `!!
+  … an incomplete run, not a change`, which is a real alarm
+
+`scores per run` counts only the shared metrics, so a filtered run no longer
+trips the partial-run warning.
+
+A guard nobody has seen fire is indistinguishable from one that never fires.
+Two ways to prove this one does:
+
+```bash
+# 1. Offline, free, no Langfuse: one case per measurement axis.
+uv run pytest tests/test_run_comparison.py -k "blocks_the_comparison" -v
+# -> 6 passed  (judge_model, seed_version, schema_version,
+#               reset_before_run, harness_sha, scenario_count)
+
+# 2. End to end, if you want to watch it happen on your own runs.
+#    tool_correctness is deterministic, so this costs NO judge calls -
+#    only the application's own LLM calls for one investigation each.
+#    Swapping the judge model is the cheapest axis to move deliberately:
+#    it changes what is recorded without changing what is measured here.
+AML_RUN_LABEL=guard-a uv run python run_experiment.py tool_correctness
+DEEPEVAL_JUDGE_MODEL=gpt-5.4 AML_RUN_LABEL=guard-b \
+  uv run python run_experiment.py tool_correctness
+uv run python compare_runs.py --runs guard-a guard-b --since 1h; echo "exit=$?"
+```
+
+The second prints `REFUSING TO COMPARE guard-a vs guard-b` with
+`judge_model … CHANGED` and `exit=2`. Add `--force` to the same command and
+it returns `exit=0` with every row tagged `UNSAFE` — that pair of outcomes,
+on the same two runs, is the check that the guard is load-bearing rather
+than decorative.
+
+**Not seeing a refusal you expected?** In order of likelihood:
+
+| What happened | Symptom |
+|---|---|
+| You compared in the Langfuse UI | No guard there at all — see above |
+| `--force` was passed | Table prints, `exit=0`, every row tagged `UNSAFE` |
+| A label is outside `--since` | `No scores found for run label(s) …`, `exit=1` — not a refusal |
+| `--offline` on a machine that did not run them | `results/` is gitignored, so another machine's runs are not in your local `scores.jsonl`. Drop `--offline` to read from Langfuse |
+| The axes genuinely match | It compares, and that is the guard passing — not failing |
 
 `AML_RESET_BEFORE_RUN=true` is not optional for a comparison run — the
 planner skips tools already completed for a case, so a reset run and an

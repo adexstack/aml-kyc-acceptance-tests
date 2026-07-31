@@ -264,6 +264,17 @@ NOT_APPLICABLE = "not_applicable"
 
 _scenario_count: str = UNAVAILABLE
 _harness_sha_cache: str | None = None
+
+# The experiment whose evaluators are currently running. Set by
+# run_experiment.py around each langfuse.run_experiment() call (they run
+# sequentially, max_concurrency=1) and recorded on every score.
+#
+# Without it, a score name is not an identity: `app_latency_ms` from
+# aml-acceptance-tool-correctness measures an investigation and the same
+# name from aml-acceptance-summarization measures a RAG query. Comparing
+# them by name alone produces a delta between two different operations -
+# a fabricated comparable. compare_runs.py keys on (experiment, name).
+current_experiment: str = UNAVAILABLE
 _trace_cache: dict[str, dict] = {}
 _app_runs: dict[str, dict] = {}
 
@@ -388,6 +399,7 @@ def run_context(app_run: str | None = None,
     """
     context = {
         "run_label": RUN_LABEL,
+        "experiment": current_experiment,
         "judge_model": JUDGE_MODEL,
         "seed_version": EXPECTED_SEED_VERSION,
         "schema_version": health().get("schema_version") or UNAVAILABLE,

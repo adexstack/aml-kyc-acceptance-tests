@@ -172,6 +172,14 @@ delta against the previous label, and — next to it — whether
 `app_prompt_version` / `app_model` / `judge_model` changed between those
 labels.
 
+> **Correction, 2026-07-31: grouping by score name alone is not enough.**
+> `app_latency_ms` exists in every experiment and means something different
+> in each — an investigation in one, a RAG query in another — so name-only
+> grouping compares two different operations and calls the difference a
+> regression. The implementation keys on `(experiment, name)`; see
+> [`../plan.md`](../plan.md) §R2.2 for the full correction and what it cost
+> to fix (one recorded field).
+
 That last column is the entire point. `regression-testing-plan.md` §2 is
 explicit that a score delta without a version fingerprint beside it "is just
 a number that moved."

@@ -389,6 +389,32 @@ for the five tool-planning metrics.
 
 ### R2.2 Then compare, with attribution beside every delta
 
+> **Correction, 2026-07-31, after this shipped.** "Group by score name" —
+> written below and in `regression_planning.md` §2 — is **wrong on its own**,
+> and it produced a real fabricated comparable before anyone noticed: a
+> `tool_correctness` run compared against a `summarization` run yielded
+> `app_latency_ms 7228 -> 9813 (+2585 !!)`, i.e. the latency of an
+> investigation against the latency of a RAG query, attributed to
+> `prompt_version investigation_v1->rag_answer_v4` — two different prompts
+> for two different endpoints, not an application change.
+>
+> **A score name is not an identity.** Scores are now keyed on
+> `(experiment, name)`, which required recording the experiment on every
+> score (`experiments/common.current_experiment`, set per run by
+> `run_experiment.py`). Runs sharing no key refuse with a distinct message,
+> and `--force` cannot override that one — there is nothing shared to print.
+> Partially overlapping runs compare the shared keys and list the rest,
+> separating "that experiment was never attempted here" (information) from
+> "that experiment ran but this score is missing" (a real incomplete-run
+> alarm). Scores stored before this fall back to name-only matching and say
+> so loudly.
+>
+> Two smaller consequences: the score-count guard now counts only shared
+> metrics, so a filtered run no longer looks partially failed; and comparing
+> with no `--runs` defaults to the two most recent labels rather than every
+> label in the window, which had been producing nine-way refusals nobody
+> asked for (`--all` restores it).
+
 When measurement axes match, pull scores via
 `scores_v3.get_many_v3(name=…, from_timestamp=…)` — or by `experiment_id`
 from the manifest for precision — group by `run_label`, and print per metric:
@@ -426,6 +452,20 @@ delta table with app attribution. **Met 2026-07-31** — `verify-a` vs
 `verify-b` (same axes) printed the table; `verify-a` vs `verify-c` (judge
 model changed) refused, naming `judge_model`, and exited 2. `--force` and
 `--offline` both exercised.
+
+**Keep the guard falsifiable.** A refusal nobody has seen fire cannot be
+told apart from one that never fires, and the axes are exactly the kind of
+thing a refactor breaks silently. The runnable check — the per-axis unit
+tests plus a deliberately-mismatched pair of live runs, with the exit codes
+each produces — is written up in `README.md` under "The comparability guard,
+and how to check it is really working". Re-run it after touching
+`run_context()` or `MEASUREMENT_AXES`.
+
+**Worth stating explicitly because it has already caused confusion:** this
+guard exists only in `compare_runs.py`. Langfuse will chart any two runs
+side by side regardless of whether they are comparable, so a chart in the UI
+is not evidence that a comparison is valid, and it does not contradict a
+refusal here.
 
 **One measurement worth carrying into R6:** `verify-a` and `verify-b` are
 two runs of the *same* metric against the *unchanged* application, and their
