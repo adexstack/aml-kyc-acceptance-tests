@@ -47,7 +47,7 @@ a deliberate deviation and is recorded here rather than made silently.
 | `ArgumentCorrectnessMetric` | Implemented and verified | `POST /api/cases/{id}/investigate` -> `GET /api/eval/export/{run_id}`; argument goldens derived from case facts + `GET /api/mcp/tools` schemas | `LLMTestCase` with `tools_called` | Yes | Judges argument plausibility against the input, so it is weaker than the deterministic argument comparison the `ToolCorrectness` notebook also performs. Treat that one as the gate and this as the explanation | None |
 | `ToolUseMetric` | Implemented and verified | `POST /api/cases/{id}/investigate`, `GET /api/eval/export/{run_id}`, `GET /api/mcp/{servers,tools}`, `POST /api/mcp/invoke` | `ConversationalTestCase` with per-turn `mcp_tools_called` | Yes | Turns are assembled by the harness from real call records; the application does not expose a native conversational transcript of an investigation, so turn boundaries are the harness's construction and not an application artefact | None required. Would be improved by an endpoint returning an investigation as an ordered turn sequence |
 | `MultiTurnMCPUseMetric` | Implemented with limitations | `GET /api/mcp/servers`, `GET /api/mcp/tools`, repeated `POST /api/mcp/invoke` | `ConversationalTestCase` with `mcp_servers` and `MCPToolCall` turns | Yes | **Dependency pin is load-bearing.** `mcp` 1.28.0 renamed `CallToolResult.structuredContent` to `structured_content`; DeepEval 4.1.4 still reads the camelCase attribute (`deepeval/metrics/mcp/utils.py:64`), so `mcp>=1.28` breaks this metric with an attribute error. Pinned `<1.28`. Also: `transport="stdio"` is declared from the application's documented MCP configuration, not discovered over the API | None. Remove the `mcp` upper bound only after DeepEval supports the renamed attribute |
-| `PlanAdherenceMetric` | **Blocked by missing API data** | `POST /api/cases/{id}/investigate` -> `GET /api/agent/trace/{run_id}` | `LLMTestCase` plus the agent's declared plan and executed trace | **No** | `GET /api/agent/trace/{run_id}` returns `deepeval_trace: null` and `tools_selected` empty, so there is no declared plan to judge adherence against. `GET /api/health` reports `eval_tracing: false`. Root cause is packaging, not configuration: `deepeval` is declared in `[project.optional-dependencies] eval`, but the backend image builds with `uv sync --frozen --no-dev`, which does not install that extra. `DEEPEVAL_AVAILABLE` is therefore false and `configure_tracing()` returns false unconditionally (`backend/app/observability.py:148`), whatever `EVAL_TRACING` is set to. The notebook detects this and raises with the exact reason rather than inferring a plan from the final answer | Install the `eval` extra in the backend image (e.g. `uv sync --frozen --no-dev --extra eval`) and ensure `EVAL_TRACING` is not disabled. Then `/api/agent/trace/{run_id}` must serve a non-null `deepeval_trace` with the planned steps, and `/api/health` must report `eval_tracing: true` |
+| `PlanAdherenceMetric` | **Unblocked 2026-07-31** - previously blocked by missing API data | `POST /api/cases/{id}/investigate` -> `GET /api/agent/trace/{run_id}` | `LLMTestCase` plus the agent's declared plan and executed trace | Yes | The application now reports `eval_tracing: true` and serves a non-null `deepeval_trace` with a populated `tools_selected`, so a declared plan exists to judge adherence against. The declared plan is composed from the trace's *ex-ante* fields - `retrieval_runs[].query`, `tools_selected[]` (tool, arguments and `reason`) and `skipped_tools[]` (tool and `reason`) - deliberately **not** from the executed span tree, which would compare the trace with itself; see the blocker note below for why that distinction is load-bearing. Both the notebook and `experiments/investigate.py` still gate on `eval_tracing` and on `deepeval_trace` being non-null, and still raise with the exact reason if either regresses. **Requires `AML_RESET_BEFORE_RUN=true`** - verified empirically 2026-07-31: on a repeat run for an already-investigated case the planner skips completed tools, `tools_selected` comes back empty, and the notebook raises "no declared plan to judge adherence against" rather than scoring. Same repeat-run constraint as `ToolCorrectnessMetric` | None, now. Was: install the `eval` extra in the backend image (`uv sync --frozen --no-dev --extra eval`) and leave `EVAL_TRACING` enabled |
 | `PIILeakageMetric` | Implemented and verified | `GET /api/documents`, `POST /api/rag/query` | `LLMTestCase` with `input`, `actual_output` | Yes | Judges only the text returned to the caller. It cannot see PII that reached a log, a prompt, or a third-party model, so a pass is evidence about the response surface only | None. Full coverage would need an API-exposed record of outbound prompts |
 | `BiasMetric` | Implemented and verified | `GET /api/cases/{id}`, `POST /api/cases/{id}/investigate` | `LLMTestCase` with `input`, `actual_output` | Yes | Single-case measurement cannot establish disparate treatment. Detecting that requires the same case run with a protected attribute varied and the outputs compared - out of scope for one notebook per metric | None. A fixture pair differing only in nationality would make this materially stronger |
 | `SummarizationMetric` | Implemented and verified | `GET /api/documents/{id}` for the source, `POST /api/rag/query` for the summary | `LLMTestCase` with `input` (source text), `actual_output` | Yes | The application has no dedicated summarisation endpoint; a RAG answer over a known policy document is used as the summary under test. That is a fair proxy but is not the same as grading a product summarisation feature | None. A first-class summarisation endpoint would make this direct |
@@ -60,44 +60,69 @@ a deliberate deviation and is recorded here rather than made silently.
 
 ## Blockers in detail
 
-### `PlanAdherenceMetric` - no externally visible plan
+### `PlanAdherenceMetric` - RESOLVED 2026-07-31
 
-- **Exact missing capability**: `GET /api/agent/trace/{run_id}` serves
-  `deepeval_trace: null` and an empty `tools_selected`. There is no other
-  documented endpoint exposing the agent's intended plan.
-- **Why it cannot be evaluated honestly without it**: plan adherence is the gap
-  between what the agent *said it would do* and what it *did*. Only the second
-  half is observable. Reconstructing the intended plan from the executed trace
-  would make the metric compare the trace with itself and score ~1.0 by
-  construction - a number that looks like a passing test and measures nothing.
-  The notebook therefore raises rather than producing a score.
-- **Application change required**: build the backend image with the `eval`
-  extra so `deepeval` is importable in the running container. Without it,
-  `configure_tracing()` returns `False` regardless of `EVAL_TRACING`, and the
-  `@observe` annotations produce nothing exportable.
-- **Suggested response schema** for `GET /api/agent/trace/{run_id}`:
+**This blocker is closed.** Kept here rather than deleted because the
+reasoning explains why the metric is written the way it is, and because the
+gate that detects a regression back to the blocked state is still in the
+code and should stay there.
 
-  ```json
-  {
-    "run_id": 12,
-    "eval_tracing": true,
-    "tools_selected": ["risk_screening.screen_sanctions_pep", "..."],
-    "deepeval_trace": {
-      "planned_steps": [
-        {"step": 1, "intent": "screen_customer", "tool": "risk_screening.screen_sanctions_pep"}
-      ],
-      "executed_steps": [
-        {"step": 1, "tool": "risk_screening.screen_sanctions_pep", "status": "success", "latency_ms": 442}
-      ]
-    }
-  }
-  ```
+**What was blocking it**: `GET /api/agent/trace/{run_id}` served
+`deepeval_trace: null` with an empty `tools_selected`, and `GET /api/health`
+reported `eval_tracing: false`. Root cause was packaging, not configuration:
+`deepeval` is declared in the backend's `[project.optional-dependencies]
+eval`, but the image built with `uv sync --frozen --no-dev`, which does not
+install that extra, so `configure_tracing()` returned false regardless of
+`EVAL_TRACING`.
 
-  `planned_steps` must be captured *before* execution for the metric to mean
-  anything.
-- **Portability impact**: none. The notebook is portable and fails with a clear,
-  actionable message on any instance that has tracing off. It starts scoring the
-  moment the application exposes the data - no test-side change needed.
+**What changed**: the application now reports `eval_tracing: true` and serves
+a non-null `deepeval_trace` with `tools_selected` populated, each entry
+carrying the agent's own `reason`.
+
+**Verified end to end 2026-07-31.** `uv run python run_all.py PlanAdherence`
+with `AML_RESET_BEFORE_RUN=true` → `1/1 notebooks passed` (65s, fresh
+kernel). The metric derives a declared plan, scores it against the executed
+trace, and clears its threshold. The same command **without** the reset
+fails loudly with "The trace reports no tools_selected, so there is no
+declared plan to judge adherence against" — which is the fail-loudly gate
+behaving correctly, not a regression.
+
+Note `run_all.py` executes notebooks in memory and discards their output, so
+the numeric score is not persisted anywhere — only pass/fail. That is
+exactly the gap `regression-testing-plan.md` Phase 0 and `plan.md` Phase R2
+(`results/scores.jsonl`) exist to close.
+
+**The point that still governs the implementation.** Plan adherence is the
+gap between what the agent *said it would do* and what it *did*.
+Reconstructing the intended plan from the executed span tree would make the
+metric compare the trace with itself and score ~1.0 by construction - a
+number that looks like a passing test and measures nothing. So the declared
+plan is composed only from fields the application records **ex ante**, each
+carrying the agent's own stated reason:
+
+| Declared-plan element | Trace field |
+|---|---|
+| Intended retrievals | `retrieval_runs[].query` |
+| Intended tool calls | `tools_selected[]` - `server`, `tool`, `arguments`, `reason` |
+| Deliberate omissions | `skipped_tools[]` - `server`, `tool`, `reason` |
+
+Adherence is then judged against the executed `steps[]` / `tool_calls[]`.
+**Do not "simplify" this by deriving the plan from the span tree** - that
+reintroduces the circularity this metric exists to avoid.
+
+**The blocked-state gate stays.** Both
+`notebooks/PlanAdherenceMetric.ipynb` and
+`experiments/investigate.py:plan_adherence_experiment` still check
+`/api/health` for `eval_tracing` and still raise if `deepeval_trace` comes
+back null, with the exact reason. That is not dead code now that the metric
+works - it is what stops a future instance built without the `eval` extra
+from silently scoring nothing. Note tracing is also ignored entirely when
+`ENVIRONMENT=production`, so the same gate covers that case.
+
+**Portability impact**: unchanged and still none. The notebook fails with a
+clear, actionable message on any instance that has tracing off, and scores
+on any instance that has it on. No test-side change was needed to unblock
+it.
 
 ### `MultiTurnMCPUseMetric` - dependency pin
 
@@ -152,8 +177,12 @@ The application annotates internal calls with DeepEval's `@observe`. That alone
 does **not** make traces available to a detached black-box harness: `@observe`
 populates an in-process trace manager, and a separate process can only see what
 an endpoint chooses to serialise. In this application that serialisation exists
-(`GET /api/agent/trace/{run_id}`, `deepeval_trace`) but currently yields `null`,
-because the library backing the annotation is absent from the deployed image.
+(`GET /api/agent/trace/{run_id}`, `deepeval_trace`) and, since 2026-07-31,
+yields real data - it previously yielded `null` because the library backing
+the annotation was absent from the deployed image. The general point stands
+regardless of that fix: `@observe` alone never exposes anything to this
+harness, so a future annotation added without a corresponding endpoint
+change remains invisible here.
 
 The general rule this suite follows: for every trace-dependent metric, request
 the data through a documented endpoint, validate the schema, map fields
@@ -165,7 +194,7 @@ never infer internal behaviour from the final answer.
 | Check | Result |
 |---|---|
 | Notebook JSON structure | All 14 valid |
-| Fresh-kernel execution, all cells in order | 13/14 pass; `PlanAdherenceMetric` blocked as above |
+| Fresh-kernel execution, all cells in order | Was 13/14 (`PlanAdherenceMetric` blocked). **`PlanAdherenceMetric` verified PASS end to end 2026-07-31** (65s, fresh kernel, `AML_RESET_BEFORE_RUN=true`, judge `gpt-5.4-mini`) - it derives a declared plan, scores, and clears its threshold. The other 13 were last verified before that date and have not been re-run since, so **14/14 is the expectation, not yet a single observed full-suite result** |
 | Hidden-state dependencies | None: every notebook defines its own configuration and helpers, imports no other notebook |
 | Imports declared in `pyproject.toml` | Yes: `deepeval`, `httpx`, `python-dotenv`, `jsonschema`, `mcp`, plus the notebook runner stack. Everything else is standard library |
 | Secrets in notebooks, outputs or logs | None. Notebooks are committed without stored outputs; the request-display helper redacts `X-API-Key` and never prints `OPENAI_API_KEY` |
