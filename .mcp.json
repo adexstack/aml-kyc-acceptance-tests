@@ -10,6 +10,18 @@
     "atlassian": {
       "type": "http",
       "url": "https://mcp.atlassian.com/v1/mcp/authv2"
+    },
+    "playwright": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@playwright/mcp@latest",
+        "--caps=testing,network",
+        "--isolated",
+        "--output-dir=.artifacts/playwright-mcp"
+      ],
+      "env": {}
     }
   }
 }

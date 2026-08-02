@@ -11,3 +11,7 @@ results/
 # outside this repo (see plan.md §1.7) so this is a dead-weight safety net,
 # not what keeps it out of git - kept in case anyone registers one in-tree.
 /actions-runner/
+
+# Playwright MCP writes traces and screenshots here (see .mcp.json).
+# Browser output from a live AML/KYC instance is not something to track.
+/.artifacts/
