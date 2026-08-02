@@ -619,13 +619,63 @@ the target instance. Never point it at anything you care about.
 
 ## Development notes
 
-- `.mcp.json` at the repo root is **developer tooling only** — it registers
-  remote MCP servers (GitHub, Atlassian) for AI coding assistants. It is
-  unrelated to `mcp_servers/`, which holds the platform's own Evidence, Risk
-  Screening and Case Actions servers. The GitHub entry
-  (`https://api.githubcopilot.com/mcp/`) does not support OAuth dynamic client
-  registration, so interactive "Authenticate" fails; it needs a token passed as
-  a header instead. Export a GitHub PAT (fine-grained, or classic with `repo` +
-  `read:org`) as `GITHUB_PAT` in your shell profile — the config references
-  `${GITHUB_PAT}` so no token is ever written to the file. Restart the assistant
-  after setting it.
+`.mcp.json` at the repo root is **developer tooling only** — it registers
+remote MCP servers (GitHub, Atlassian) for AI coding assistants. Nothing in
+the 14 notebooks or `run_all.py` reads it, and deleting it changes nothing
+about how the suite runs. Despite the name it has no connection to the MCP
+servers the *application* exposes, which this harness reaches over HTTP like
+any other endpoint.
+
+### GitHub MCP authentication
+
+The GitHub entry (`https://api.githubcopilot.com/mcp/`) does not support OAuth
+dynamic client registration, so the interactive "Authenticate" flow dead-ends.
+The token goes in an `Authorization` header instead. `.mcp.json` references
+`${GITHUB_PAT}` rather than a literal value, so no token is ever written to a
+tracked file.
+
+`${GITHUB_PAT}` is expanded from the environment of the process that starts the
+assistant, **not** from this repo's `.env` — the `.env` loading in
+`experiments/common.py` happens inside Python, long after the MCP client has
+already read its config. A `GITHUB_PAT` that only lives in `.env` therefore
+produces `claude mcp list` failures in every new terminal. Export it from your
+shell profile:
+
+```bash
+cat >> ~/.zshrc <<'EOF'
+
+# GitHub PAT used by the Claude GitHub MCP server
+if [[ -f /path/to/aml-kyc-acceptance-tests/.env ]]; then
+  set -a
+  source /path/to/aml-kyc-acceptance-tests/.env
+  set +a
+fi
+EOF
+source ~/.zshrc
+[[ -n "$GITHUB_PAT" ]] && echo "GITHUB_PAT loaded successfully"
+claude mcp list
+```
+
+Two consequences worth knowing before you copy that block:
+
+- `set -a` exports **everything** in `.env`, not just `GITHUB_PAT` — including
+  `AML_API_BASE_URL` and any judge-model API keys — into every interactive
+  shell you open. Anything you launch from that shell inherits them. If you'd
+  rather not have the judge keys ambient, export the one variable instead:
+  `export GITHUB_PAT=$(grep '^GITHUB_PAT=' .env | cut -d= -f2-)`.
+- `source` runs `.env` as shell script. It works for the simple `KEY=value`
+  lines this repo uses, but a value containing spaces, quotes or `#` will not
+  survive it intact the way `python-dotenv` would parse it.
+
+Restart the assistant after setting the variable — the MCP config is read at
+startup.
+
+### Token scopes
+
+The PAT needs **Pull requests: read and write** in addition to repository read
+access (classic tokens: `repo`, plus `read:org`). Without it, reads and pushes
+succeed but opening a PR fails with `403 Resource not accessible by personal
+access token` — an easy failure to misread as a network or config problem.
+
+`.env` is gitignored and must stay that way; it is the only place a real token
+should live.
