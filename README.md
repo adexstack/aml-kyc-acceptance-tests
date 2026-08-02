@@ -615,3 +615,17 @@ AML_RESET_BEFORE_RUN=true uv run python run_all.py
 
 This calls `POST /api/dev/reset`, which **drops and recreates every table** on
 the target instance. Never point it at anything you care about.
+
+
+## Development notes
+
+- `.mcp.json` at the repo root is **developer tooling only** — it registers
+  remote MCP servers (GitHub, Atlassian) for AI coding assistants. It is
+  unrelated to `mcp_servers/`, which holds the platform's own Evidence, Risk
+  Screening and Case Actions servers. The GitHub entry
+  (`https://api.githubcopilot.com/mcp/`) does not support OAuth dynamic client
+  registration, so interactive "Authenticate" fails; it needs a token passed as
+  a header instead. Export a GitHub PAT (fine-grained, or classic with `repo` +
+  `read:org`) as `GITHUB_PAT` in your shell profile — the config references
+  `${GITHUB_PAT}` so no token is ever written to the file. Restart the assistant
+  after setting it.
